@@ -43,7 +43,9 @@ warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Exact, case-insensitive family-name match (avoids "Inter" vs "Inter Tight").
-family_installed() { fc-list : family | grep -qix "$1"; }
+# Some variable fonts report a comma-separated multi-value family — e.g. Outfit's
+# VF lists "Outfit,Outfit Thin" — so split on commas before matching tokens.
+family_installed() { fc-list : family | tr ',' '\n' | grep -qix "$1"; }
 
 # True if the file begins with a valid sfnt signature (TTF/OTF/true/collection).
 is_font() {
