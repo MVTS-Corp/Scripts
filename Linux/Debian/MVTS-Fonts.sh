@@ -1,34 +1,60 @@
 #!/usr/bin/env bash
 #
-# install-fonts.sh — Install Google Fonts system-wide on Debian/Ubuntu.
+# MVTS-Fonts.sh — Install Google Fonts system-wide on Debian/Ubuntu.
 #
-# Idempotent: safe to re-run. Families already present are skipped unless
-# --force is given. Installs its own dependencies (curl, unzip, fontconfig).
+# Pulls TTFs directly from the google/fonts GitHub repo (raw host), which is
+# deterministic and not subject to the unofficial fonts.google.com/download
+# endpoint's flakiness or to api.github.com's 60/hour unauthenticated limit.
+#
+# Every download is validated as a real font (sfnt magic bytes) before install,
+# so an upstream rename surfaces as a clear error instead of a broken archive.
+#
+# Idempotent: families already present are skipped unless --force is given.
+# Dependencies (curl, fontconfig) are installed automatically if missing.
 #
 # Usage:
-#   sudo ./install-fonts.sh           # install missing families
-#   sudo ./install-fonts.sh --force   # reinstall everything
+#   sudo ./MVTS-Fonts.sh           # install missing families
+#   sudo ./MVTS-Fonts.sh --force   # reinstall everything
 #
 set -euo pipefail
 
 # --- Configuration ---------------------------------------------------------
-FONT_FAMILIES=(
-  "Permanent Marker"
-  "Archivo Black"
-  "Outfit"
-  "Inter"
-)
+# Pin REF to a commit SHA instead of "main" if you need byte-for-byte
+# reproducibility across a fleet (protects against upstream file renames).
+REF="main"
+BASE="https://raw.githubusercontent.com/google/fonts/${REF}"
 INSTALL_DIR="/usr/local/share/fonts/google"
-PREFER_STATIC=true   # use static instances for variable fonts when available
+
+# family name -> space-separated repo-relative TTF path(s).
+# Inter and Outfit are variable fonts (all weights Thin->Black in one file);
+# Permanent Marker and Archivo Black are single-weight display faces.
+# Need discrete static weights instead? They live under each family's
+# static/ subdir, e.g. ofl/inter/static/Inter-SemiBold.ttf
+declare -A FONT_FILES=(
+  ["Permanent Marker"]="apache/permanentmarker/PermanentMarker-Regular.ttf"
+  ["Archivo Black"]="ofl/archivoblack/ArchivoBlack-Regular.ttf"
+  ["Outfit"]="ofl/outfit/Outfit[wght].ttf"
+  ["Inter"]="ofl/inter/Inter[opsz,wght].ttf ofl/inter/Inter-Italic[opsz,wght].ttf"
+)
 
 # --- Helpers ---------------------------------------------------------------
 log()  { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
-# Exact, case-insensitive family-name match against fontconfig's family list.
-# Avoids substring false positives (e.g. "Inter" vs "Inter Tight").
+# Exact, case-insensitive family-name match (avoids "Inter" vs "Inter Tight").
 family_installed() { fc-list : family | grep -qix "$1"; }
+
+# True if the file begins with a valid sfnt signature (TTF/OTF/true/collection).
+is_font() {
+  case "$(head -c4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" in
+    00010000|4f54544f|74727565|74746366) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Percent-encode the bracket characters used in variable-font filenames.
+url_encode() { local s="${1//\[/%5B}"; printf '%s' "${s//\]/%5D}"; }
 
 FORCE=false
 [[ "${1:-}" == "--force" ]] && FORCE=true
@@ -37,13 +63,13 @@ FORCE=false
 [[ $EUID -eq 0 ]] || err "Please run as root (sudo)."
 
 missing=false
-for cmd in curl unzip fc-cache fc-list; do
+for cmd in curl fc-cache fc-list od; do
   command -v "$cmd" >/dev/null 2>&1 || missing=true
 done
 if $missing; then
-  log "Installing dependencies (curl, unzip, fontconfig)…"
+  log "Installing dependencies (curl, fontconfig)…"
   apt-get update -qq
-  apt-get install -y -qq curl unzip fontconfig
+  apt-get install -y -qq curl fontconfig
 fi
 
 # --- Install ---------------------------------------------------------------
@@ -52,38 +78,30 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 changed=false
-for fam in "${FONT_FAMILIES[@]}"; do
+for fam in "${!FONT_FILES[@]}"; do
   if ! $FORCE && family_installed "$fam"; then
     log "Already installed: $fam (skipping; use --force to reinstall)"
     continue
   fi
 
-  log "Downloading: $fam"
-  enc="${fam// /%20}"
-  zip="$TMP/${fam// /_}.zip"
-  if ! curl -fsSL -o "$zip" "https://fonts.google.com/download?family=${enc}"; then
-    warn "Download failed for '$fam' — skipping."
-    continue
-  fi
+  log "Fetching: $fam"
+  for path in ${FONT_FILES[$fam]}; do
+    fn="${path##*/}"
+    out="$TMP/$fn"
 
-  dest="$TMP/${fam// /_}"
-  unzip -oq "$zip" -d "$dest"
+    if ! curl -gfsSL -o "$out" "${BASE}/$(url_encode "$path")"; then
+      warn "  download failed: $fn"
+      continue
+    fi
+    if ! is_font "$out"; then
+      warn "  not a valid font (upstream moved?): $fn"
+      continue
+    fi
 
-  # Prefer static instances (broader compatibility than variable fonts).
-  src="$dest"
-  if $PREFER_STATIC && [[ -d "$dest/static" ]]; then
-    src="$dest/static"
-  fi
-
-  count=$(find "$src" -type f \( -iname '*.ttf' -o -iname '*.otf' \) | wc -l)
-  if (( count == 0 )); then
-    warn "No font files found in download for '$fam' — skipping."
-    continue
-  fi
-
-  find "$src" -type f \( -iname '*.ttf' -o -iname '*.otf' \) \
-    -exec install -m 644 {} "$INSTALL_DIR/" \;
-  changed=true
+    install -m 644 "$out" "$INSTALL_DIR/$fn"
+    printf '    fetched %s (%s bytes)\n' "$fn" "$(stat -c%s "$out")"
+    changed=true
+  done
 done
 
 # --- Finalize --------------------------------------------------------------
@@ -97,7 +115,7 @@ fi
 # --- Verify ----------------------------------------------------------------
 log "Verifying:"
 ok=true
-for fam in "${FONT_FAMILIES[@]}"; do
+for fam in "${!FONT_FILES[@]}"; do
   if family_installed "$fam"; then
     printf '    \033[1;32m✓\033[0m %s\n' "$fam"
   else
