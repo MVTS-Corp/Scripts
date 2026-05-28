@@ -12,9 +12,14 @@
 # Idempotent: families already present are skipped unless --force is given.
 # Dependencies (curl, fontconfig) are installed automatically if missing.
 #
-# Usage:
+# Usage (local):
 #   sudo ./MVTS-Fonts.sh           # install missing families
 #   sudo ./MVTS-Fonts.sh --force   # reinstall everything
+#
+# Usage (remote, run straight from the repo):
+#   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Debian/MVTS-Fonts.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Debian/MVTS-Fonts.sh | sudo bash -s -- --force
+#   (the '-s --' is required to pass --force through to the piped script)
 #
 set -euo pipefail
 
