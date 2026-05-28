@@ -1,1 +1,1 @@
-Root Directory For All Linux Scripts
+This is the root directory for scripts used in Linux.
