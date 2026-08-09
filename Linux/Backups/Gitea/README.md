@@ -1,4 +1,4 @@
-README.md v2.2.0 (Last Rev: 2026-08-09)
+README.md v2.3.0 (Last Rev: 2026-08-09)
 
 # Gitea Backup and Restore (rsync over SSH)
 
@@ -56,6 +56,20 @@ native rsync daemon (port 873):
 ## Quick Start
 
 ### 0. Get the Files
+
+No clone needed - fetch just the four files in this folder:
+
+```bash
+mkdir -p gitea-backup && cd gitea-backup
+BASE="https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Backups/Gitea"
+for f in gitea-backup.sh gitea-restore.sh gitea-backup.conf README.md; do
+    curl -fsSL "$BASE/$f" -o "$f"
+done
+chmod +x gitea-backup.sh gitea-restore.sh
+```
+
+Prefer a full clone instead (e.g. to track future updates with `git
+pull`, or to browse the rest of the repo)?
 
 ```bash
 git clone https://github.com/MVTS-Corp/Scripts.git
