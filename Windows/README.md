@@ -25,13 +25,3 @@ To work with more than one, clone the whole repo instead:
 git clone https://github.com/MVTS-Corp/Scripts.git
 cd Scripts\Windows
 ```
-
-## After Install Configuration
-
-See the relevant subfolder's README - configuration is specific to each
-tool.
-
-## Troubleshooting
-
-See the relevant subfolder's README - logs and error conditions are
-specific to each tool.

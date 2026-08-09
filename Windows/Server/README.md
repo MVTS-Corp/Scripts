@@ -10,15 +10,3 @@ It is currently a placeholder with no scripts checked in yet.
 None yet. Add server-specific scripts here as they are built, each in its
 own subfolder if the script grows to more than one file (following the
 pattern used by `Windows/MVTS/` and `Windows/Development-Tools/`).
-
-## Quick Start
-
-N/A - nothing to install yet.
-
-## After Install Configuration
-
-N/A - nothing to install yet.
-
-## Troubleshooting
-
-N/A - nothing to install yet.

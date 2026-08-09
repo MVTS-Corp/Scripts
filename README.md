@@ -29,13 +29,3 @@ git clone https://github.com/MVTS-Corp/Scripts.git
 Most individual tools are also independently installable with a single
 curl (Linux) or irm (Windows) one-liner without cloning anything - see
 that tool's own README for the exact command.
-
-## After Install Configuration
-
-N/A at this level - configuration is specific to each tool. See the
-relevant subfolder's README.
-
-## Troubleshooting
-
-N/A at this level - see the relevant subfolder's README for logs and
-error conditions specific to that tool.
