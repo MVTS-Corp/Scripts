@@ -10,14 +10,25 @@
     interactively rather than accepting it as a plaintext argument, so it
     never lands in shell history or a saved script.
 
+.PARAMETER GiteaHost
+    Your Gitea instance URL, e.g. https://git.example.com. No default -
+    every deployment points at a different Gitea instance, so this must
+    be supplied explicitly via -GiteaHost or, if omitted, you will be
+    prompted for it interactively.
+
+.PARAMETER TeaLoginName
+    Local profile name used for the optional `tea` CLI login (tea login
+    add --name ...). Purely a local label; defaults to "gitea".
+
 .NOTES
-    Version: v1.0.1
-    Last Edit Date: 2026-08-01
+    Version: v1.1.0
+    Last Edit Date: 2026-08-09
 #>
 
 param(
-    [string]$GiteaHost = "https://git.tzh.ter.zoo",
+    [string]$GiteaHost,
     [string]$ToolsPath = "C:\DATA\Tools",
+    [string]$TeaLoginName = "gitea",
     [switch]$SkipTeaLogin
 )
 
@@ -30,6 +41,22 @@ if (-not (Test-Path $giteaMcpExe)) {
     Write-Error "gitea-mcp.exe not found at $giteaMcpExe - check the path."
     exit 1
 }
+
+# --- Resolve the Gitea host URL: use -GiteaHost if given, else prompt.
+#     No baked-in default - pointing this at the wrong Gitea instance
+#     silently registers gitea-mcp against someone else's server. ---
+if ([string]::IsNullOrWhiteSpace($GiteaHost)) {
+    $GiteaHost = Read-Host "Enter your Gitea host URL (e.g. https://git.example.com)"
+}
+if ([string]::IsNullOrWhiteSpace($GiteaHost)) {
+    Write-Error "No Gitea host URL entered - aborting."
+    exit 1
+}
+if ($GiteaHost -notmatch '^https?://') {
+    Write-Error "Gitea host URL must start with http:// or https:// - got '$GiteaHost'."
+    exit 1
+}
+$GiteaHost = $GiteaHost.TrimEnd('/')
 
 # --- Prompt for the PAT securely ---
 $secureToken = Read-Host "Enter your Gitea Personal Access Token" -AsSecureString
@@ -82,8 +109,8 @@ if ($LASTEXITCODE -ne 0) {
 if (-not $SkipTeaLogin -and (Test-Path $teaExe)) {
     $giteaUsername = Read-Host "Enter your Gitea username (for tea CLI login, press Enter to skip)"
     if (-not [string]::IsNullOrWhiteSpace($giteaUsername)) {
-        & $teaExe login add --name tzh-gitea --url $GiteaHost --user $giteaUsername --token $token
-        Write-Host "tea CLI login profile 'tzh-gitea' created."
+        & $teaExe login add --name $TeaLoginName --url $GiteaHost --user $giteaUsername --token $token
+        Write-Host "tea CLI login profile '$TeaLoginName' created."
     } else {
         Write-Host "Skipping tea CLI login (no username entered)."
     }
