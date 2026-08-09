@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 #
-# MVTS-Fonts.sh — Install Google Fonts system-wide on Debian/Ubuntu.
+# MVTS-Fonts.sh
+# 2026-08-09
+# Version: v1.1.0
 #
-# Pulls TTFs directly from the google/fonts GitHub repo (raw host), which is
+# PURPOSE:
+# Install the MVTS brand Google Fonts system-wide on Debian/Ubuntu. Pulls
+# TTFs directly from the google/fonts GitHub repo (raw host), which is
 # deterministic and not subject to the unofficial fonts.google.com/download
 # endpoint's flakiness or to api.github.com's 60/hour unauthenticated limit.
 #
@@ -17,8 +21,8 @@
 #   sudo ./MVTS-Fonts.sh --force   # reinstall everything
 #
 # Usage (remote, run straight from the repo):
-#   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Debian/MVTS-Fonts.sh | sudo bash
-#   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Debian/MVTS-Fonts.sh | sudo bash -s -- --force
+#   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/MVTS/MVTS-Fonts.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/MVTS/MVTS-Fonts.sh | sudo bash -s -- --force
 #   (the '-s --' is required to pass --force through to the piped script)
 #
 set -euo pipefail

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    MVTS-Fonts.ps1 - Install Google Fonts system-wide on Windows.
+    MVTS-Fonts.ps1 - Install the MVTS brand Google Fonts system-wide on Windows.
 
 .DESCRIPTION
     Pulls TTFs directly from the google/fonts GitHub repo (raw host), which is
@@ -27,10 +27,14 @@
 .EXAMPLE
     # Remote, straight from the repo (run in an ELEVATED PowerShell):
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    irm https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Windows/MVTS-Fonts.ps1 | iex
+    irm https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Windows/MVTS/MVTS-Fonts.ps1 | iex
 
     # Remote with -Force (iex can't take params, so wrap in a scriptblock):
-    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Windows/MVTS-Fonts.ps1))) -Force
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Windows/MVTS/MVTS-Fonts.ps1))) -Force
+
+.NOTES
+    Version: v1.1.0
+    Last Edit Date: 2026-08-09
 #>
 [CmdletBinding()]
 param(
