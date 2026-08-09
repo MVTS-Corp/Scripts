@@ -1,0 +1,526 @@
+#!/usr/bin/env bash
+#
+# gitea-restore.sh
+# 2026-08-09
+# Version: v1.0.0
+#
+# PURPOSE:
+# Restores a Gitea instance from an archive produced by gitea-backup.sh
+# (repos + data dir + a portable DB dump, bundled by "gitea dump"). Can
+# fetch the archive from the NAS or use a local file, and can either
+# perform a real restore into the production container or an on-demand
+# test-restore into an isolated, throwaway container that never touches
+# production data, volumes, or network.
+#
+# gitea dump has no matching single "gitea restore" command upstream as of
+# writing - restoring is a manual, version-dependent process (see Gitea's
+# own "Backup and Restore" docs). This script automates everything that is
+# safely automatable without guessing at things this project does not
+# actually know (database engine, credentials, exact volume topology) and
+# stops with clear, actionable instructions for the one step it will not
+# guess at: importing gitea-db.sql. Provide DB_RESTORE_CMD / (for
+# --test-restore only) TEST_RESTORE_DB_CMD in the config to automate that
+# step too - see gitea-backup.conf.
+#
+# WHAT --test-restore DOES AND DOES NOT PROVE:
+# --test-restore always runs against a brand-new container on an isolated
+# Docker network with its own throwaway volume - never production's
+# network, volumes, or DB_RESTORE_CMD. This deliberately means a
+# test-restore run cannot corrupt or disrupt production even if invoked
+# with a broken config, but it also means that unless TEST_RESTORE_DB_CMD
+# is separately configured to point at a real (non-production) test
+# database, the database is never actually imported during a test-restore,
+# and a Gitea instance normally backed by an external MySQL/Postgres host
+# will very likely fail to come fully healthy in isolation simply because
+# it cannot reach that host - this is expected and is treated as
+# informational, not a failure. What --test-restore DOES always verify
+# unattended: the archive is fetchable and intact, it unpacks to the
+# expected internal files, and the repository/data files place correctly
+# into a real Gitea container layout without operator intervention. That
+# is most of what actually goes wrong in a real restore.
+#
+# USAGE:
+#   gitea-restore.sh --check
+#       Dependency check + NAS connectivity check only.
+#   gitea-restore.sh --list
+#       List archives available on the NAS.
+#   gitea-restore.sh --dry-run [--archive NAME|latest] [--local-file PATH]
+#       Fetch (or use --local-file) and verify an archive's integrity.
+#       Touches nothing else.
+#   gitea-restore.sh --test-restore [--archive NAME|latest] [--local-file PATH]
+#       Full restore into an isolated throwaway container. Safe to run at
+#       any time, including on a schedule - see header note above.
+#   gitea-restore.sh --restore --confirm [--archive NAME|latest] [--local-file PATH]
+#       Real restore into the production container (GITEA_CONTAINER_NAME).
+#       Stops that container, moves its existing repo/data directories
+#       aside (renamed, not deleted), replaces them with the archive's
+#       contents, then restarts it. --confirm is required and is not a
+#       synonym for --dry-run - this is the disruptive, production path.
+#
+# CONFIG:
+#   Reads /etc/gitea-backup/gitea-backup.conf by default (same file as
+#   gitea-backup.sh - see that file's "Restore" section). Override with
+#   GITEA_BACKUP_CONF=/path/to/file.conf gitea-restore.sh
+
+set -euo pipefail
+
+CONF_FILE="${GITEA_BACKUP_CONF:-/etc/gitea-backup/gitea-backup.conf}"
+MODE=""
+ARCHIVE_NAME=""
+LOCAL_FILE=""
+CONFIRM=0
+
+usage() {
+    cat <<'EOF'
+Usage:
+  gitea-restore.sh --check
+  gitea-restore.sh --list
+  gitea-restore.sh --dry-run       [--archive NAME|latest] [--local-file PATH]
+  gitea-restore.sh --test-restore  [--archive NAME|latest] [--local-file PATH]
+  gitea-restore.sh --restore --confirm [--archive NAME|latest] [--local-file PATH]
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check) MODE="check"; shift ;;
+        --list) MODE="list"; shift ;;
+        --dry-run) MODE="dry-run"; shift ;;
+        --test-restore) MODE="test-restore"; shift ;;
+        --restore) MODE="restore"; shift ;;
+        --archive) ARCHIVE_NAME="${2:-}"; shift 2 ;;
+        --local-file) LOCAL_FILE="${2:-}"; shift 2 ;;
+        --confirm) CONFIRM=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if [[ -z "$MODE" ]]; then
+    usage >&2
+    exit 2
+fi
+if [[ "$MODE" == "restore" && "$CONFIRM" -ne 1 ]]; then
+    echo "ERROR: --restore requires --confirm. This stops the production container and replaces its data. Run --dry-run or --test-restore first." >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+log() {
+    local level="$1"; shift
+    local line
+    line="$(date '+%Y-%m-%d %H:%M:%S') [RESTORE][${level}] $*"
+    echo "$line"
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        echo "$line" >> "$LOG_FILE" 2>/dev/null || true
+    fi
+}
+
+FAILED_CONTEXT=""
+fail_trap() {
+    local lineno="$1"
+    log ERROR "gitea-restore.sh failed at line ${lineno}. ${FAILED_CONTEXT}"
+    send_failure_notification "Failed at line ${lineno}. ${FAILED_CONTEXT}"
+    exit 1
+}
+trap 'fail_trap "$LINENO"' ERR
+
+# ---------------------------------------------------------------------------
+# Notification (bounded retry, never blocks/hangs the run)
+# ---------------------------------------------------------------------------
+send_mail_raw() {
+    local subject="$1" body="$2"
+    local max_attempts=3 attempt=1
+    [[ -z "${NOTIFY_EMAIL:-}" ]] && return 0
+    while (( attempt <= max_attempts )); do
+        if echo "$body" | timeout 30 mail -s "$subject" -r "${MAIL_FROM:-gitea-backup@localhost}" "$NOTIFY_EMAIL"; then
+            return 0
+        fi
+        (( attempt < max_attempts )) && sleep $(( attempt * 5 ))
+        (( attempt++ ))
+    done
+    log WARN "Failed to send notification email after ${max_attempts} attempts."
+    return 0
+}
+
+send_failure_notification() {
+    local detail="$1"
+    local tail_log=""
+    [[ -f "${LOG_FILE:-}" ]] && tail_log="$(tail -n 30 "$LOG_FILE" 2>/dev/null || true)"
+    send_mail_raw "Gitea RESTORE FAILED on $(hostname)" "$(printf 'Gitea restore failed.\n\nMode: %s\nDetail: %s\n\nLast log lines:\n%s\n' "$MODE" "$detail" "$tail_log")"
+}
+
+# See gitea-backup.sh for why this exists: a bare `exit 1` does NOT trigger
+# the ERR trap in bash (only a command that itself fails does), so every
+# deliberate failure exit must go through this function or it silently
+# never notifies despite logging and exiting non-zero.
+die() {
+    local msg="$1"
+    log ERROR "$msg"
+    send_failure_notification "$msg"
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Load config (shared with gitea-backup.sh)
+# ---------------------------------------------------------------------------
+if [[ ! -f "$CONF_FILE" ]]; then
+    die "Config file not found: ${CONF_FILE}"
+fi
+# shellcheck disable=SC1090
+source "$CONF_FILE"
+
+for required_var in GITEA_CONTAINER_NAME GITEA_APP_INI GITEA_REPO_ROOT \
+                     STAGING_DIR NAS_SSH_HOST NAS_SSH_PORT NAS_SSH_USER \
+                     NAS_SSH_KEY NAS_KNOWN_HOSTS NAS_REMOTE_PATH \
+                     RSYNC_TIMEOUT MAX_TRANSFER_ATTEMPTS MIN_DUMP_SIZE_BYTES; do
+    if [[ -z "${!required_var:-}" ]]; then
+        die "${required_var} is not set in ${CONF_FILE}"
+    fi
+done
+
+for numeric_var in RSYNC_TIMEOUT MAX_TRANSFER_ATTEMPTS MIN_DUMP_SIZE_BYTES \
+                    NAS_SSH_PORT; do
+    if ! [[ "${!numeric_var}" =~ ^[0-9]+$ ]]; then
+        die "${numeric_var}='${!numeric_var}' in ${CONF_FILE} is not a positive integer."
+    fi
+done
+
+RESTORE_STAGING_DIR="${RESTORE_STAGING_DIR:-${STAGING_DIR}/restore}"
+RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-21600}"
+RESTORE_TEST_CONTAINER_PREFIX="${RESTORE_TEST_CONTAINER_PREFIX:-gitea-test-restore}"
+RESTORE_TEST_PORT="${RESTORE_TEST_PORT:-3080}"
+RESTORE_TEST_DATA_MOUNT="${RESTORE_TEST_DATA_MOUNT:-/data}"
+RESTORE_TEST_HEALTH_GRACE_SECONDS="${RESTORE_TEST_HEALTH_GRACE_SECONDS:-60}"
+for numeric_var in RESTORE_TIMEOUT RESTORE_TEST_PORT RESTORE_TEST_HEALTH_GRACE_SECONDS; do
+    if ! [[ "${!numeric_var}" =~ ^[0-9]+$ ]]; then
+        die "${numeric_var}='${!numeric_var}' in ${CONF_FILE} is not a positive integer."
+    fi
+done
+
+APP_DATA_ROOT="$(dirname "$(dirname "$GITEA_APP_INI")")"
+
+# ---------------------------------------------------------------------------
+# Dependency check (all up front, one pass)
+# ---------------------------------------------------------------------------
+FAILED_CONTEXT="Dependency check"
+declare -A REQUIRED_PKGS=(
+    [docker]="docker.io"
+    [unzip]="unzip"
+    [curl]="curl"
+    [rsync]="rsync"
+    [ssh]="openssh-client"
+    [flock]="util-linux"
+    [timeout]="coreutils"
+)
+missing_cmds=()
+for cmd in "${!REQUIRED_PKGS[@]}"; do
+    command -v "$cmd" >/dev/null 2>&1 || missing_cmds+=("$cmd")
+done
+if (( ${#missing_cmds[@]} )); then
+    for c in "${missing_cmds[@]}"; do
+        log ERROR "Missing required command: ${c} -> apt package: ${REQUIRED_PKGS[$c]}"
+    done
+    die "Missing required commands: ${missing_cmds[*]}"
+fi
+if [[ -n "${NOTIFY_EMAIL:-}" ]] && ! command -v mail >/dev/null 2>&1; then
+    log WARN "NOTIFY_EMAIL is set but 'mail' command is not installed (mailutils/bsd-mailx). Alerts will not be sent."
+fi
+
+# ---------------------------------------------------------------------------
+# Pre-flight: SSH key checks + NAS connectivity (not required for a
+# --local-file run, but cheap and worth doing before the disruptive modes)
+# ---------------------------------------------------------------------------
+FAILED_CONTEXT="Pre-flight: SSH key checks"
+if [[ ! -f "$NAS_SSH_KEY" ]]; then
+    die "SSH key not found: ${NAS_SSH_KEY}"
+fi
+key_perm="$(stat -c '%a' "$NAS_SSH_KEY")"
+if [[ "$key_perm" != "600" && "$key_perm" != "400" ]]; then
+    die "SSH key ${NAS_SSH_KEY} has permissions ${key_perm}, expected 600 or 400. Refusing to use it: 'chmod 600 ${NAS_SSH_KEY}'."
+fi
+if [[ ! -f "$NAS_KNOWN_HOSTS" ]]; then
+    die "known_hosts file not found: ${NAS_KNOWN_HOSTS}."
+fi
+SSH_OPTS="-i ${NAS_SSH_KEY} -p ${NAS_SSH_PORT} -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${NAS_KNOWN_HOSTS}"
+
+FAILED_CONTEXT="Pre-flight: SSH connectivity and remote path check"
+# shellcheck disable=SC2086
+if ! timeout 20 ssh $SSH_OPTS "${NAS_SSH_USER}@${NAS_SSH_HOST}" \
+    "test -d '${NAS_REMOTE_PATH}' && test -r '${NAS_REMOTE_PATH}'"; then
+    die "Cannot reach ${NAS_SSH_HOST} as ${NAS_SSH_USER}, or ${NAS_REMOTE_PATH} does not exist / is not readable."
+fi
+log INFO "Confirmed SSH access to ${NAS_SSH_HOST}:${NAS_REMOTE_PATH}"
+
+FAILED_CONTEXT="Pre-flight: docker reachability"
+# Unlike gitea-backup.sh, restore does NOT require GITEA_CONTAINER_NAME to
+# already be running - the most common reason to restore is that it isn't.
+if ! timeout 10 docker info >/dev/null 2>&1; then
+    die "Cannot reach the docker daemon."
+fi
+
+FAILED_CONTEXT="Pre-flight: staging directory"
+mkdir -p "$RESTORE_STAGING_DIR"
+
+if [[ "$MODE" == "check" ]]; then
+    log INFO "Checks passed. --check specified, exiting without further action."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# List available archives
+# ---------------------------------------------------------------------------
+list_archives() {
+    # shellcheck disable=SC2086
+    timeout 20 ssh $SSH_OPTS "${NAS_SSH_USER}@${NAS_SSH_HOST}" \
+        "cd '${NAS_REMOTE_PATH}' && ls -1 gitea-dump-*.zip 2>/dev/null | sort" || true
+}
+
+if [[ "$MODE" == "list" ]]; then
+    listing="$(list_archives)"
+    if [[ -z "$listing" ]]; then
+        log INFO "No gitea-dump-*.zip archives found on NAS at ${NAS_REMOTE_PATH}."
+    else
+        echo "$listing"
+    fi
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Exclusive lock (same rationale as gitea-backup.sh: prevents two restores,
+# or a restore and a test-restore, racing on the same staging dir/container.
+# Held via fd, so it can never go stale.)
+# ---------------------------------------------------------------------------
+LOCK_FILE="${RESTORE_STAGING_DIR}/.gitea-restore.lock"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    log WARN "Another gitea-restore.sh run appears to be in progress (lock: ${LOCK_FILE}). Exiting without action."
+    exit 0
+fi
+
+TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
+
+# ---------------------------------------------------------------------------
+# Resolve and fetch the archive. Nothing disruptive has happened yet -
+# nothing below this point touches the production container until the
+# archive is confirmed present and has passed integrity verification.
+# ---------------------------------------------------------------------------
+FAILED_CONTEXT="Resolving archive"
+if [[ -n "$LOCAL_FILE" ]]; then
+    [[ -f "$LOCAL_FILE" ]] || die "--local-file not found: ${LOCAL_FILE}"
+    ARCHIVE_LOCAL_PATH="$LOCAL_FILE"
+    ARCHIVE_NAME="$(basename "$LOCAL_FILE")"
+    log INFO "Using local archive: ${ARCHIVE_LOCAL_PATH}"
+else
+    if [[ -z "$ARCHIVE_NAME" || "$ARCHIVE_NAME" == "latest" ]]; then
+        listing="$(list_archives)"
+        [[ -z "$listing" ]] && die "No gitea-dump-*.zip archives found on NAS at ${NAS_REMOTE_PATH}."
+        ARCHIVE_NAME="$(echo "$listing" | tail -n1)"
+        log INFO "Resolved 'latest' to: ${ARCHIVE_NAME}"
+    fi
+    ARCHIVE_LOCAL_PATH="${RESTORE_STAGING_DIR}/${ARCHIVE_NAME}"
+
+    FAILED_CONTEXT="Fetching archive from NAS"
+    fetch_attempt=1
+    fetch_ok=0
+    while (( fetch_attempt <= MAX_TRANSFER_ATTEMPTS )); do
+        # shellcheck disable=SC2086
+        if rsync -az --protect-args --partial --timeout="$RSYNC_TIMEOUT" -e "ssh $SSH_OPTS" \
+            "${NAS_SSH_USER}@${NAS_SSH_HOST}:${NAS_REMOTE_PATH}/${ARCHIVE_NAME}" "$ARCHIVE_LOCAL_PATH"; then
+            fetch_ok=1
+            break
+        fi
+        log WARN "rsync fetch attempt ${fetch_attempt}/${MAX_TRANSFER_ATTEMPTS} failed."
+        (( fetch_attempt < MAX_TRANSFER_ATTEMPTS )) && sleep $(( fetch_attempt * 10 ))
+        (( fetch_attempt++ ))
+    done
+    (( fetch_ok )) || die "Failed to fetch ${ARCHIVE_NAME} from NAS after ${MAX_TRANSFER_ATTEMPTS} attempts."
+    log INFO "Fetched ${ARCHIVE_NAME} to ${ARCHIVE_LOCAL_PATH}"
+fi
+
+# ---------------------------------------------------------------------------
+# Verify archive integrity before trusting it with anything
+# ---------------------------------------------------------------------------
+FAILED_CONTEXT="Verifying archive"
+if [[ ! -s "$ARCHIVE_LOCAL_PATH" ]]; then
+    die "Archive is missing or empty: ${ARCHIVE_LOCAL_PATH}"
+fi
+archive_size="$(stat -c '%s' "$ARCHIVE_LOCAL_PATH")"
+if (( archive_size < MIN_DUMP_SIZE_BYTES )); then
+    die "Archive is suspiciously small (${archive_size} bytes, minimum ${MIN_DUMP_SIZE_BYTES}). Not trusting it."
+fi
+if ! unzip -tq "$ARCHIVE_LOCAL_PATH" >/dev/null; then
+    die "Archive failed zip integrity check: ${ARCHIVE_LOCAL_PATH}"
+fi
+archive_listing="$(unzip -l "$ARCHIVE_LOCAL_PATH")"
+for inner in gitea-db.sql gitea-data.zip; do
+    if ! grep -q "$inner" <<< "$archive_listing"; then
+        die "Archive ${ARCHIVE_NAME} does not contain expected ${inner}. This does not look like a gitea dump archive."
+    fi
+done
+if ! grep -q "gitea-repo.zip" <<< "$archive_listing"; then
+    log WARN "Archive does not contain gitea-repo.zip (expected for an instance with zero repositories; otherwise this is unexpected)."
+fi
+log INFO "Archive verified: ${ARCHIVE_LOCAL_PATH} (${archive_size} bytes)."
+
+if [[ "$MODE" == "dry-run" ]]; then
+    log INFO "--dry-run specified. Archive fetched and verified; no container was touched."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Extract on the host (not inside the container - the official Gitea image
+# is not guaranteed to ship unzip, and unzip is already a confirmed
+# dependency here).
+# ---------------------------------------------------------------------------
+FAILED_CONTEXT="Extracting archive"
+EXTRACT_DIR="${RESTORE_STAGING_DIR}/work-${TIMESTAMP}"
+mkdir -p "$EXTRACT_DIR"
+if ! timeout "$RESTORE_TIMEOUT" unzip -q "$ARCHIVE_LOCAL_PATH" -d "$EXTRACT_DIR"; then
+    die "Failed to extract ${ARCHIVE_LOCAL_PATH} to ${EXTRACT_DIR}."
+fi
+mkdir -p "${EXTRACT_DIR}/repo-root" "${EXTRACT_DIR}/app-data-root"
+if [[ -f "${EXTRACT_DIR}/gitea-repo.zip" ]]; then
+    unzip -q "${EXTRACT_DIR}/gitea-repo.zip" -d "${EXTRACT_DIR}/repo-root" \
+        || die "Failed to extract gitea-repo.zip."
+fi
+if ! unzip -q "${EXTRACT_DIR}/gitea-data.zip" -d "${EXTRACT_DIR}/app-data-root"; then
+    die "Failed to extract gitea-data.zip."
+fi
+log INFO "Archive extracted to ${EXTRACT_DIR}."
+
+# ---------------------------------------------------------------------------
+# Health check: one authoritative signal (still running after a grace
+# period - proves the restored data did not crash Gitea outright), the
+# rest informational only, per the tiered health check pattern.
+# ---------------------------------------------------------------------------
+health_check() {
+    local target="$1" http_port="${2:-}"
+    log INFO "Waiting up to ${RESTORE_TEST_HEALTH_GRACE_SECONDS}s for ${target} to come up..."
+    local waited=0
+    while (( waited < RESTORE_TEST_HEALTH_GRACE_SECONDS )); do
+        sleep 5
+        waited=$(( waited + 5 ))
+        local state
+        state="$(docker inspect -f '{{.State.Running}}' "$target" 2>/dev/null || echo false)"
+        if [[ "$state" != "true" ]]; then
+            die "${target} is not running after restore (crashed or exited). Check: docker logs ${target}"
+        fi
+    done
+    log INFO "${target} is still running ${RESTORE_TEST_HEALTH_GRACE_SECONDS}s after restart (authoritative health signal)."
+    if [[ -n "$http_port" ]]; then
+        if timeout 10 curl -fsS "http://127.0.0.1:${http_port}/api/healthz" >/dev/null 2>&1; then
+            log INFO "HTTP health endpoint responded (informational)."
+        else
+            log WARN "HTTP health endpoint did not respond within 10s (informational only - expected for an isolated test-restore container that cannot reach an external DB it is normally configured to use; not treated as a failure)."
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Core restore: stop -> move existing data aside (never deleted) -> copy in
+# restored data -> DB restore hook (if configured) -> start -> health check.
+# Moving-aside is done via a short-lived helper container that shares the
+# target's volumes via --volumes-from, because "docker exec" (needed to
+# run mv) requires a RUNNING container, and the target is deliberately
+# stopped before its data is touched.
+# ---------------------------------------------------------------------------
+restore_pipeline() {
+    local target="$1" db_hook="$2" http_port="${3:-}"
+
+    local image
+    image="$(docker inspect -f '{{.Config.Image}}' "$target" 2>/dev/null || echo "")"
+    [[ -z "$image" ]] && die "Could not determine the image in use by container '${target}'."
+
+    FAILED_CONTEXT="Stopping ${target} before restore"
+    log INFO "Stopping ${target}..."
+    timeout "$RESTORE_TIMEOUT" docker stop "$target" >/dev/null || die "Failed to stop container '${target}'."
+
+    FAILED_CONTEXT="Moving aside existing data in ${target}"
+    local suffix="pre-restore-${TIMESTAMP}"
+    if ! timeout "$RESTORE_TIMEOUT" docker run --rm --volumes-from "$target" "$image" sh -c "
+        set -e
+        [ -d '${GITEA_REPO_ROOT}' ] && mv '${GITEA_REPO_ROOT}' '${GITEA_REPO_ROOT}.${suffix}'
+        [ -d '${APP_DATA_ROOT}' ] && mv '${APP_DATA_ROOT}' '${APP_DATA_ROOT}.${suffix}'
+        mkdir -p '${GITEA_REPO_ROOT}' '${APP_DATA_ROOT}'
+    "; then
+        die "Failed to move aside existing data in ${target}. Container is stopped, not yet started - safe to investigate before retrying. Nothing has been overwritten."
+    fi
+    log INFO "Existing data in ${target} preserved as *.${suffix} (not deleted)."
+
+    FAILED_CONTEXT="Copying restored data into ${target}"
+    if [[ -d "${EXTRACT_DIR}/repo-root" ]] && [[ -n "$(ls -A "${EXTRACT_DIR}/repo-root" 2>/dev/null)" ]]; then
+        docker cp "${EXTRACT_DIR}/repo-root/." "${target}:${GITEA_REPO_ROOT}/" \
+            || die "Failed to copy restored repositories into ${target}. It is stopped with the pre-restore data preserved as *.${suffix} - safe to investigate."
+    fi
+    docker cp "${EXTRACT_DIR}/app-data-root/." "${target}:${APP_DATA_ROOT}/" \
+        || die "Failed to copy restored app data into ${target}. It is stopped with the pre-restore data preserved as *.${suffix} - safe to investigate."
+    log INFO "Restored repository and app data copied into ${target}."
+
+    if [[ -n "$db_hook" ]]; then
+        FAILED_CONTEXT="Restoring database via configured hook"
+        if ! RESTORE_SQL_HOST_PATH="${EXTRACT_DIR}/gitea-db.sql" bash -c "$db_hook"; then
+            die "Configured DB restore command failed. Container is stopped with restored files in place; the SQL dump is still at ${EXTRACT_DIR}/gitea-db.sql for manual restoration."
+        fi
+        log INFO "Database restore hook completed."
+    else
+        log WARN "No DB restore hook configured. Database was NOT restored. Extracted dump SQL is at: ${EXTRACT_DIR}/gitea-db.sql - restore it manually with your DB engine's client before this instance will serve correct data."
+    fi
+
+    FAILED_CONTEXT="Starting ${target} after restore"
+    timeout "$RESTORE_TIMEOUT" docker start "$target" >/dev/null \
+        || die "Failed to start container '${target}' after restore. It is currently stopped with restored files in place - investigate before retrying."
+
+    health_check "$target" "$http_port"
+}
+
+if [[ "$MODE" == "restore" ]]; then
+    log INFO "Starting REAL restore of ${ARCHIVE_NAME} into production container ${GITEA_CONTAINER_NAME}."
+    restore_pipeline "$GITEA_CONTAINER_NAME" "${DB_RESTORE_CMD:-}" ""
+    rm -rf "$EXTRACT_DIR"
+    log INFO "Restore complete. Manually verify: web UI reachable, SSO login works, a known repo clones, and the CI runner can still authenticate - see README.md."
+    send_mail_raw "Gitea restore completed on $(hostname)" "$(printf 'Restored %s into %s.\n\nManual verification still needed: web UI, SSO login, a test clone, and CI runner auth.\n' "$ARCHIVE_NAME" "$GITEA_CONTAINER_NAME")"
+    exit 0
+fi
+
+if [[ "$MODE" == "test-restore" ]]; then
+    TEST_NAME="${RESTORE_TEST_CONTAINER_PREFIX}-${TIMESTAMP}"
+    TEST_VOLUME="${TEST_NAME}-data"
+
+    teardown_test() {
+        log INFO "Tearing down test-restore container and volume..."
+        docker rm -f "$TEST_NAME" >/dev/null 2>&1 || true
+        docker volume rm "$TEST_VOLUME" >/dev/null 2>&1 || true
+        rm -rf "$EXTRACT_DIR"
+    }
+    trap teardown_test EXIT
+
+    FAILED_CONTEXT="Resolving image for test-restore"
+    PROD_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$GITEA_CONTAINER_NAME" 2>/dev/null || echo "")"
+    TEST_IMAGE="${RESTORE_TEST_IMAGE:-$PROD_IMAGE}"
+    [[ -z "$TEST_IMAGE" ]] && die "Could not resolve an image for the test-restore container. Set RESTORE_TEST_IMAGE explicitly, or ensure ${GITEA_CONTAINER_NAME} exists so its image can be reused."
+
+    FAILED_CONTEXT="Creating isolated test-restore container"
+    log INFO "Creating isolated test-restore container ${TEST_NAME} from ${TEST_IMAGE} (own volume, own network - never production's)."
+    docker volume create "$TEST_VOLUME" >/dev/null
+    docker run -d --name "$TEST_NAME" \
+        -v "${TEST_VOLUME}:${RESTORE_TEST_DATA_MOUNT}" \
+        -p "${RESTORE_TEST_PORT}:3000" \
+        "$TEST_IMAGE" >/dev/null \
+        || die "Failed to start the isolated test-restore container from ${TEST_IMAGE}."
+
+    # Let it boot once on a clean volume so Gitea creates its default
+    # directory structure at GITEA_REPO_ROOT/APP_DATA_ROOT before those
+    # paths are overwritten below.
+    sleep 15
+    timeout "$RESTORE_TIMEOUT" docker stop "$TEST_NAME" >/dev/null \
+        || die "Test-restore container ${TEST_NAME} did not stop cleanly after its initial boot."
+
+    restore_pipeline "$TEST_NAME" "${TEST_RESTORE_DB_CMD:-}" "$RESTORE_TEST_PORT"
+
+    log INFO "Test-restore of ${ARCHIVE_NAME} PASSED mechanical checks (fetch, integrity, extraction, file placement, container health)."
+    send_mail_raw "Gitea test-restore PASSED on $(hostname)" "$(printf 'Test-restore of %s completed and the container stayed healthy.\n\nDB restore hook configured: %s\n(If not configured, this run did not validate the database import step - see script header.)\n' "$ARCHIVE_NAME" "$( [[ -n "${TEST_RESTORE_DB_CMD:-}" ]] && echo yes || echo no )")"
+    exit 0
+fi

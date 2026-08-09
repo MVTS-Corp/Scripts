@@ -1,4 +1,4 @@
-README.md v1.0.0 (Last Rev: 2026-08-09)
+README.md v1.1.0 (Last Rev: 2026-08-09)
 
 ## Overview
 
@@ -7,6 +7,8 @@ self-contained tool with its own README.
 
 ## Files
 
+- **Backups/** - backup and restore tooling for self-hosted services, one
+  subfolder per service. See `Backups/README.md`.
 - **Group-MGMT/** - provisions fixed-GID groups consistently across the
   MVTS Linux fleet. See `Group-MGMT/README.md`.
 - **MVTS/** - installs the MVTS brand fonts system-wide. See
