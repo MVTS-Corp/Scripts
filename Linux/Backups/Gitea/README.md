@@ -1,16 +1,16 @@
-README.md v2.5.0 (Last Rev: 2026-08-09)
+README.md v3.0.0 (Last Rev: 2026-08-09)
 
-# Gitea Backup and Restore (rsync over SSH)
+# Gitea Backup and Restore (SFTP)
 
 ## Overview
 
 `gitea-backup.sh` runs Gitea's built-in `gitea dump` inside the running
 Gitea container (bundling repos, LFS data, the database dump, and config
-into one archive), verifies the result, and ships it to a NAS via rsync
-over SSH. This gives Gitea an independent recovery path separate from the
-Docker host's full-container-set backup: a bad host backup, a host
-rebuild, or an environmental event at the primary site does not take out
-your only copy of Gitea.
+into one archive), verifies the result, and ships it to a NAS via SFTP.
+This gives Gitea an independent recovery path separate from the Docker
+host's full-container-set backup: a bad host backup, a host rebuild, or an
+environmental event at the primary site does not take out your only copy
+of Gitea.
 
 `gitea dump` is used instead of a hand-rolled DB dump + volume tar because
 it bundles repos, LFS data, a database dump, and app config into one
@@ -24,17 +24,28 @@ isolated, throwaway container that never touches production data, volumes,
 or network - so "can we actually restore from this backup" is a fact you
 can check on a schedule, not an assumption. See "Restore" below.
 
-**Transport decision: rsync over SSH**, not plain SFTP and not the NAS's
-native rsync daemon (port 873):
+**Transport decision: SFTP**, not rsync-over-SSH and not the NAS's native
+rsync daemon (port 873):
 
-- Plain SFTP has no independent integrity check and no resume; a
-  half-finished transfer means starting over and manually confirming the
-  result.
+- Many NAS platforms (Synology DSM confirmed) restrict full interactive
+  SSH access - the kind rsync-over-SSH needs - to administrator accounts
+  only. SFTP is typically a separate, permission-scoped service on the
+  same platforms, usable by a normal least-privilege account without
+  needing admin rights or a custom command-restriction wrapper.
+- SFTP still runs over SSH: same key, still encrypted in transit, still
+  works with a dedicated known_hosts file. It just needs no remote command
+  execution capability at all, which is what makes it compatible with an
+  account that genuinely cannot do anything else.
 - The native rsync daemon protocol transmits unencrypted unless separately
   tunneled, and authenticates against a flat secrets file rather than a key.
-- rsync over SSH reuses the SSH/SFTP service already enabled on the NAS,
-  encrypts in transit, supports resumable/delta transfer, and allows a
-  dedicated backup key to be locked to exactly one directory.
+- Tradeoffs accepted for this: SFTP's `put`/`get` have no delta/resume
+  equivalent to rsync's `--partial` (a retry re-transfers the whole file
+  from scratch), and independent post-transfer integrity verification is
+  an optional, more expensive re-fetch-and-compare (see `VERIFY_TRANSFER`)
+  instead of a cheap remote checksum command - SFTP-only access has no way
+  to run a remote command at all. Neither of these matters much for what
+  this script actually does (one full new file per run, not an incremental
+  sync of an existing large tree), which is why the tradeoff was accepted.
 
 ## Files
 
@@ -98,7 +109,7 @@ crontab line) to wherever you put the file.
 | `STAGING_DIR` | Required (`/var/backups/gitea-staging`) | Where dumps are staged locally before transfer. Any writable path - created automatically if missing. |
 | `STAGING_RETENTION_DAYS` | Required (`3`) | How long staged copies are kept locally. See "Retention" below. |
 
-### NAS Transport (rsync over SSH)
+### NAS Transport (SFTP)
 
 | Variable | Required? | What It Controls |
 |---|---|---|
@@ -108,10 +119,9 @@ crontab line) to wherever you put the file.
 | `NAS_SSH_KEY` | Required, no default | Path to the private key from Quick Start step 3. Any path - just keep it readable only by whoever runs this script, mode 600 or 400. |
 | `NAS_KNOWN_HOSTS` | Required, no default | Path to the dedicated known_hosts file from Quick Start step 4. Any path. |
 | `NAS_REMOTE_PATH` | Required, no default | Filesystem path on the NAS, not the SMB share name. See Quick Start step 1. |
-| `RSYNC_TIMEOUT` | Required (`120`) | Per-attempt rsync stall timeout, seconds. |
-| `MAX_TRANSFER_ATTEMPTS` | Required (`3`) | Bounded retry count for the NAS transfer. |
-| `RSYNC_REMOTE_BIN` | Optional, blank by default | Full path to `rsync` on the NAS. Needed on platforms that don't put it on the SSH session's PATH (Synology DSM 7 is a known case - try `/usr/bin/rsync`). See Troubleshooting. |
-| `REMOTE_SHA256SUM_CMD` | Optional (`sha256sum`) | Command on the NAS used for independent post-transfer verification. Set to `""` if the NAS shell doesn't have it. |
+| `TRANSFER_TIMEOUT` | Required (`120`) | Per-attempt SFTP stall timeout, seconds. |
+| `MAX_TRANSFER_ATTEMPTS` | Required (`3`) | Bounded retry count for the NAS transfer. Each retry re-transfers the whole file - see "Transport" above. |
+| `VERIFY_TRANSFER` | Optional, blank by default | Set to `"yes"` to independently verify each transfer by re-fetching it and comparing checksums locally. Off by default - doubles the transfer. See "Transport" above and Troubleshooting. |
 
 ### Retention and Sanity Checks
 
@@ -180,7 +190,7 @@ cd Scripts/Linux/Backups/Gitea
 ### 1. Confirm the Remote Path
 
 If what you have is an SMB share path (e.g. `\\nas-host\backups\Gitea`),
-SSH/rsync need the underlying filesystem path instead, which is usually
+SFTP needs the underlying filesystem path instead, which is usually
 different from the share name. SSH into the NAS as an admin account and
 find it, for example:
 
@@ -221,11 +231,15 @@ Gitea backup folder only, with no access to other shares. On Synology this
 is done through Control Panel > User & Group > permissions, per shared
 folder.
 
-**Synology-specific:** DSM only allows accounts in the administrators
-group to open an SSH session at all - a non-admin account will accept the
-password and then the connection closes immediately with no error
-message. If that happens, see the callout under step 3 below before
-concluding SSH won't work for this account.
+**Synology-specific:** DSM restricts full interactive SSH login to
+accounts in the administrators group - a non-admin account will accept
+the password/key and then the connection closes immediately with no error
+message. This does **not** block SFTP, though: DSM exposes it as a
+separate service (Control Panel > File Services > FTP/SFTP) that a
+normal, permission-scoped account can use even though it can't get a
+shell. That's the whole reason this tool uses SFTP rather than
+rsync-over-SSH - see "Transport" in the Overview above. Enable SFTP there
+if it isn't already.
 
 ### 3. Generate a Dedicated SSH Key Pair
 
@@ -240,35 +254,31 @@ sudo chmod 644 /etc/gitea-backup/id_ed25519_gitea-backup.pub
 
 Install the public key on the NAS for the `gitea-backup` account (DSM:
 User & Group > the user > Advanced/SSH public key, or append to that
-account's `~/.ssh/authorized_keys` if managed manually).
+account's `~/.ssh/authorized_keys` if managed manually). Everything after
+`-C` in the `ssh-keygen` command is just a label (the key's comment field)
+- it has no effect on authentication and can be anything, or omitted.
 
-**Recommended hardening (if the NAS ships `rrsync`):** restrict the key to
-write-only access on exactly this directory, so a leaked key cannot be
-used for anything else:
+**Recommended hardening:** add these SSH options in front of the key in
+`authorized_keys` (comma-separated, no spaces around the commas):
 
 ```
-command="/usr/bin/rrsync -wo '/volume1/backups/Gitea/'",no-port-forwarding,no-X11-forwarding,no-pty,no-agent-forwarding ssh-ed25519 AAAA... gitea-backup@dockerhost
+no-port-forwarding,no-X11-forwarding,no-pty,no-agent-forwarding ssh-ed25519 AAAA... gitea-backup@dockerhost
 ```
 
-If the NAS doesn't ship `rrsync`, the per-account share permission from
-step 2 is your primary control instead - the key can log in, but the
-account itself can't touch anything outside that folder.
+These don't restrict SFTP itself - DSM's own SFTP-only account access
+already does that (see step 2) - but they close off other things a leaked
+key could otherwise be used for on the same connection: tunneling traffic
+through the NAS, allocating a terminal, or relaying SSH-agent
+authentication elsewhere. Do not add a `command=` forced-command option on
+top of these - DSM's own account-level SFTP restriction is what actually
+gates this account, and a competing forced command could conflict with it
+rather than add anything.
 
-**If your NAS requires an administrator account for SSH at all (Synology
-DSM does):** the step 2 permission scoping stops being the real
-restriction, since the account itself now has admin rights. The
-forced-command hardening above becomes the entire privilege boundary
-instead - a leaked copy of *this specific key* still only ever triggers
-the one restricted `rrsync -wo` command, regardless of what the
-underlying account could otherwise do interactively. Two things matter
-more in this situation:
-- Disable password login for this account (key-only), since a leaked or
-  guessed password now means full admin access, not just this backup.
-- Confirm `rrsync` is genuinely present on the NAS (`which rrsync` over
-  SSH as an admin) before relying on it - without it, this account no
-  longer has the step 2 fallback either, so write a minimal custom
-  forced-command wrapper script instead of skipping the restriction
-  entirely.
+If your account still can't SSH in at all after installing the key (same
+symptom as above: connects, then closes with no error), it's not yet in
+whatever group/permission DSM requires for SFTP access either - double
+check step 2, or test with `sftp -i <key> <user>@<host>` directly, which
+is a more direct test than a full shell attempt.
 
 ### 4. Pre-Seed the Known Hosts File
 
@@ -300,7 +310,7 @@ sudo chmod +x /usr/local/bin/gitea-backup.sh /usr/local/bin/gitea-restore.sh
 Run each stage manually and confirm it's clean before trusting it to cron:
 
 ```bash
-sudo /usr/local/bin/gitea-backup.sh --check      # deps + SSH connectivity + write test
+sudo /usr/local/bin/gitea-backup.sh --check      # deps + SFTP connectivity + write test
 sudo /usr/local/bin/gitea-backup.sh --dry-run     # full dump + verification, no transfer
 sudo /usr/local/bin/gitea-backup.sh               # full run, transfers to the NAS
 ```
@@ -403,39 +413,33 @@ things this project doesn't manage.
 **`--check` fails with "Cannot reach ... or path does not exist / is not
 writable"** - either the SSH key isn't authorized for that account yet, or
 `NAS_REMOTE_PATH` is wrong. Re-run the path confirmation in step 1; the
-SMB share name is never the same string as the filesystem path.
+SMB share name is never the same string as the filesystem path. Test the
+same connection directly to narrow it down: `sftp -i <NAS_SSH_KEY>
+<NAS_SSH_USER>@<NAS_SSH_HOST>`.
 
-**Dependency check fails on `rsync` or `ssh`** - install `rsync` and
-`openssh-client` on the Docker host: `sudo apt-get install rsync
-openssh-client`.
+**Dependency check fails on `sftp` or `ssh`** - install `openssh-client`
+on the Docker host: `sudo apt-get install openssh-client` (this provides
+both).
 
-**rsync transfer or fetch fails with "Permission denied", but the `--check`
-SSH connectivity test passes** - some NAS platforms (Synology DSM 7 is a
-known case) don't put `rsync` on the PATH an SSH session gets, so rsync
-can authenticate and connect but still fail to find its own binary on the
-far end. This won't show up in `--check` (plain SSH connectivity only) or
-`--dry-run` (stops before the transfer), so it can surprise you on the
-first real run. Set `RSYNC_REMOTE_BIN` in the config to the full path of
-`rsync` on the NAS - `/usr/bin/rsync` on Synology - and re-run.
+**Testing with `sftp` prompts for a password instead of using the key** -
+the public key isn't installed in the account's `authorized_keys` on the
+NAS yet (or wasn't added correctly) - see Quick Start step 3. A password
+prompt succeeding confirms the account and network path are fine; it's
+specifically key-based auth that isn't wired up yet, which the actual
+scripts require (`BatchMode=yes` - they never prompt for a password, they
+just fail if the key doesn't work).
 
 **SSH key works interactively but the dedicated backup account's session
 closes immediately after the password/key, with no error** - on Synology
-DSM, only accounts in the administrators group can open an SSH session at
-all; this is the exact symptom of a non-admin account being silently
-rejected. See the callout under Quick Start step 3 for how to keep this
-encrypted (SSH) anyway rather than falling back to the unencrypted native
-rsync daemon.
+DSM, only accounts in the administrators group can open a full interactive
+SSH session at all; this is the exact symptom of a non-admin account being
+silently rejected. This is expected and does not affect SFTP - see the
+Synology-specific note under Quick Start step 2.
 
-**Remote checksum always shows "skipping independent verification"** - the
-NAS shell doesn't have `sha256sum` (common on BusyBox-based NAS shells).
-This is non-fatal; rsync's own transfer-level integrity checking still
-applies. If you find an equivalent command available on the NAS (e.g.
-`md5sum`), point `REMOTE_SHA256SUM_CMD` at it, understanding it becomes an
-MD5 comparison instead.
-
-**A run fails and the log shows "Checksum mismatch after transfer"** - the
-script has already deleted the bad copy from the NAS before failing, so
-you won't be left trusting a corrupt backup. Just re-run.
+**A run fails and the log shows "Checksum mismatch after transfer"** (only
+possible with `VERIFY_TRANSFER=yes`) - the script has already deleted the
+bad copy from the NAS before failing, so you won't be left trusting a
+corrupt backup. Just re-run.
 
 **A backup or restore run logs "Another ... run appears to be in
 progress" and exits 0** - a previous run (likely a slow `gitea dump` on a
