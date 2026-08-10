@@ -2,7 +2,7 @@
 #
 # gitea-restore.sh
 # 2026-08-09
-# Version: v1.0.0
+# Version: v1.1.0
 #
 # PURPOSE:
 # Restores a Gitea instance from an archive produced by gitea-backup.sh
@@ -325,9 +325,14 @@ else
     FAILED_CONTEXT="Fetching archive from NAS"
     fetch_attempt=1
     fetch_ok=0
+    # See gitea-backup.sh for why RSYNC_REMOTE_BIN exists (some NAS
+    # platforms, e.g. Synology DSM 7, don't put rsync on the SSH session's
+    # default PATH).
+    RSYNC_EXTRA_ARGS=()
+    [[ -n "${RSYNC_REMOTE_BIN:-}" ]] && RSYNC_EXTRA_ARGS+=(--rsync-path="$RSYNC_REMOTE_BIN")
     while (( fetch_attempt <= MAX_TRANSFER_ATTEMPTS )); do
         # shellcheck disable=SC2086
-        if rsync -az --protect-args --partial --timeout="$RSYNC_TIMEOUT" -e "ssh $SSH_OPTS" \
+        if rsync -az --protect-args --partial --timeout="$RSYNC_TIMEOUT" "${RSYNC_EXTRA_ARGS[@]}" -e "ssh $SSH_OPTS" \
             "${NAS_SSH_USER}@${NAS_SSH_HOST}:${NAS_REMOTE_PATH}/${ARCHIVE_NAME}" "$ARCHIVE_LOCAL_PATH"; then
             fetch_ok=1
             break

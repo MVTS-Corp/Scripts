@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # gitea-backup.sh
-# 2026-08-08
-# Version: v2.0.0
+# 2026-08-09
+# Version: v2.1.0
 #
 # PURPOSE:
 # Runs "gitea dump" inside a running Gitea container (repos + LFS + DB dump
@@ -331,15 +331,19 @@ fi
 FAILED_CONTEXT="Transferring dump to NAS via rsync"
 transfer_attempt=1
 transfer_ok=0
+# Some NAS platforms (e.g. Synology DSM 7) don't put rsync on the default
+# PATH an SSH session gets, so rsync-over-SSH fails with "Permission
+# denied" unless the remote binary's full path is given explicitly. Only
+# added if RSYNC_REMOTE_BIN is set - most Linux SSH targets don't need it.
+RSYNC_EXTRA_ARGS=()
+[[ -n "${RSYNC_REMOTE_BIN:-}" ]] && RSYNC_EXTRA_ARGS+=(--rsync-path="$RSYNC_REMOTE_BIN")
 while (( transfer_attempt <= MAX_TRANSFER_ATTEMPTS )); do
     # --protect-args stops rsync from handing the destination path to the
-    # remote shell for interpretation. NAS_REMOTE_PATH contains characters
-    # ($, !) that are inert with the current placeholder path only by
-    # coincidence of what follows them; since that path is explicitly
-    # unconfirmed (see CLAUDE.md), do not depend on that coincidence
-    # holding for whatever the real path turns out to be.
+    # remote shell for interpretation - required since NAS_REMOTE_PATH
+    # commonly contains characters like $ or ! (e.g. a path under a share
+    # named admin$) that a remote shell could otherwise try to interpret.
     # shellcheck disable=SC2086
-    if rsync -az --protect-args --partial --timeout="$RSYNC_TIMEOUT" -e "ssh $SSH_OPTS" \
+    if rsync -az --protect-args --partial --timeout="$RSYNC_TIMEOUT" "${RSYNC_EXTRA_ARGS[@]}" -e "ssh $SSH_OPTS" \
         "$STAGED_FILE" "${NAS_SSH_USER}@${NAS_SSH_HOST}:${NAS_REMOTE_PATH}/"; then
         transfer_ok=1
         break

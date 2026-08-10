@@ -1,4 +1,4 @@
-README.md v2.4.0 (Last Rev: 2026-08-09)
+README.md v2.5.0 (Last Rev: 2026-08-09)
 
 # Gitea Backup and Restore (rsync over SSH)
 
@@ -110,6 +110,7 @@ crontab line) to wherever you put the file.
 | `NAS_REMOTE_PATH` | Required, no default | Filesystem path on the NAS, not the SMB share name. See Quick Start step 1. |
 | `RSYNC_TIMEOUT` | Required (`120`) | Per-attempt rsync stall timeout, seconds. |
 | `MAX_TRANSFER_ATTEMPTS` | Required (`3`) | Bounded retry count for the NAS transfer. |
+| `RSYNC_REMOTE_BIN` | Optional, blank by default | Full path to `rsync` on the NAS. Needed on platforms that don't put it on the SSH session's PATH (Synology DSM 7 is a known case - try `/usr/bin/rsync`). See Troubleshooting. |
 | `REMOTE_SHA256SUM_CMD` | Optional (`sha256sum`) | Command on the NAS used for independent post-transfer verification. Set to `""` if the NAS shell doesn't have it. |
 
 ### Retention and Sanity Checks
@@ -220,6 +221,12 @@ Gitea backup folder only, with no access to other shares. On Synology this
 is done through Control Panel > User & Group > permissions, per shared
 folder.
 
+**Synology-specific:** DSM only allows accounts in the administrators
+group to open an SSH session at all - a non-admin account will accept the
+password and then the connection closes immediately with no error
+message. If that happens, see the callout under step 3 below before
+concluding SSH won't work for this account.
+
 ### 3. Generate a Dedicated SSH Key Pair
 
 On the Docker host, as the user that will run cron:
@@ -246,6 +253,22 @@ command="/usr/bin/rrsync -wo '/volume1/backups/Gitea/'",no-port-forwarding,no-X1
 If the NAS doesn't ship `rrsync`, the per-account share permission from
 step 2 is your primary control instead - the key can log in, but the
 account itself can't touch anything outside that folder.
+
+**If your NAS requires an administrator account for SSH at all (Synology
+DSM does):** the step 2 permission scoping stops being the real
+restriction, since the account itself now has admin rights. The
+forced-command hardening above becomes the entire privilege boundary
+instead - a leaked copy of *this specific key* still only ever triggers
+the one restricted `rrsync -wo` command, regardless of what the
+underlying account could otherwise do interactively. Two things matter
+more in this situation:
+- Disable password login for this account (key-only), since a leaked or
+  guessed password now means full admin access, not just this backup.
+- Confirm `rrsync` is genuinely present on the NAS (`which rrsync` over
+  SSH as an admin) before relying on it - without it, this account no
+  longer has the step 2 fallback either, so write a minimal custom
+  forced-command wrapper script instead of skipping the restriction
+  entirely.
 
 ### 4. Pre-Seed the Known Hosts File
 
@@ -385,6 +408,23 @@ SMB share name is never the same string as the filesystem path.
 **Dependency check fails on `rsync` or `ssh`** - install `rsync` and
 `openssh-client` on the Docker host: `sudo apt-get install rsync
 openssh-client`.
+
+**rsync transfer or fetch fails with "Permission denied", but the `--check`
+SSH connectivity test passes** - some NAS platforms (Synology DSM 7 is a
+known case) don't put `rsync` on the PATH an SSH session gets, so rsync
+can authenticate and connect but still fail to find its own binary on the
+far end. This won't show up in `--check` (plain SSH connectivity only) or
+`--dry-run` (stops before the transfer), so it can surprise you on the
+first real run. Set `RSYNC_REMOTE_BIN` in the config to the full path of
+`rsync` on the NAS - `/usr/bin/rsync` on Synology - and re-run.
+
+**SSH key works interactively but the dedicated backup account's session
+closes immediately after the password/key, with no error** - on Synology
+DSM, only accounts in the administrators group can open an SSH session at
+all; this is the exact symptom of a non-admin account being silently
+rejected. See the callout under Quick Start step 3 for how to keep this
+encrypted (SSH) anyway rather than falling back to the unencrypted native
+rsync daemon.
 
 **Remote checksum always shows "skipping independent verification"** - the
 NAS shell doesn't have `sha256sum` (common on BusyBox-based NAS shells).
