@@ -1,4 +1,4 @@
-README.md v2.3.0 (Last Rev: 2026-08-09)
+README.md v2.4.0 (Last Rev: 2026-08-09)
 
 # Gitea Backup and Restore (rsync over SSH)
 
@@ -50,10 +50,110 @@ native rsync daemon (port 873):
   "Restore" below.
 - `gitea-backup.conf` - all site-specific values shared by both scripts
   (container name, NAS host, paths, retention, restore settings,
-  notification settings). Copy to `/etc/gitea-backup/gitea-backup.conf`
-  and edit; never edit either script for a new deployment.
+  notification settings). See "Configuration Reference" below for every
+  variable; never edit either script for a new deployment, only this
+  file.
+
+## Configuration Reference
+
+`gitea-backup.conf` is the single source of truth for every site-specific
+value both scripts use - nothing else is hardcoded. Every path below
+(SSH key, known_hosts, staging directories, log file) can point anywhere
+you like; the values in the shipped template and in the Quick Start
+walkthrough below are just the suggested default layout (`/etc/gitea-backup`
+for config/keys, `/var/backups` for staging, `/var/log` for logs). The
+only rule is consistency: wherever you actually put a file, set the
+matching variable to that exact path.
+
+The config file's own location is equally flexible. Both scripts default
+to reading `/etc/gitea-backup/gitea-backup.conf`, but this is overridable
+with the `GITEA_BACKUP_CONF` environment variable:
+
+```bash
+GITEA_BACKUP_CONF=/opt/gitea-backup/gitea-backup.conf /opt/gitea-backup/gitea-backup.sh --check
+```
+
+So a fully self-contained deployment under one directory - e.g.
+everything under `/opt/gitea-backup`: scripts, config, key, known_hosts,
+staging, and logs - works exactly as well as the `/etc` + `/usr/local/bin`
++ `/var` layout the Quick Start below uses as its example. Just set
+`GITEA_BACKUP_CONF` (as a prefix on manual runs, or exported in the
+crontab line) to wherever you put the file.
+
+### Container Identity
+
+| Variable | Required? | What It Controls |
+|---|---|---|
+| `GITEA_CONTAINER_NAME` | Required, no default | Name (not ID) of the running Gitea container, e.g. `gitea`. |
+| `GITEA_CONTAINER_USER` | Optional (`git`) | User `gitea dump` runs as inside the container - must match what the image actually uses. |
+| `GITEA_APP_INI` | Optional (`/data/gitea/conf/app.ini`) | Path to `app.ini` inside the container. |
+| `GITEA_CONTAINER_TMP` | Optional (`/data/gitea-dump-tmp`) | Scratch path inside the container where the dump is written before `docker cp` pulls it out. |
+| `GITEA_REPO_ROOT` | Required for `gitea-restore.sh` only | Where Gitea stores repositories inside the container. See Quick Start step 1b - confirm, don't guess. |
+| `DUMP_TIMEOUT` | Optional (`21600`, 6h) | Bounds the `gitea dump` step. See "Reliability" below. |
+
+### Local Staging (on the Docker host, not the NAS)
+
+| Variable | Required? | What It Controls |
+|---|---|---|
+| `STAGING_DIR` | Required (`/var/backups/gitea-staging`) | Where dumps are staged locally before transfer. Any writable path - created automatically if missing. |
+| `STAGING_RETENTION_DAYS` | Required (`3`) | How long staged copies are kept locally. See "Retention" below. |
+
+### NAS Transport (rsync over SSH)
+
+| Variable | Required? | What It Controls |
+|---|---|---|
+| `NAS_SSH_HOST` | Required, no default | NAS hostname or IP. |
+| `NAS_SSH_PORT` | Required (`22`) | SSH port on the NAS. |
+| `NAS_SSH_USER` | Required (`gitea-backup`) | The dedicated NAS account from Quick Start step 2. |
+| `NAS_SSH_KEY` | Required, no default | Path to the private key from Quick Start step 3. Any path - just keep it readable only by whoever runs this script, mode 600 or 400. |
+| `NAS_KNOWN_HOSTS` | Required, no default | Path to the dedicated known_hosts file from Quick Start step 4. Any path. |
+| `NAS_REMOTE_PATH` | Required, no default | Filesystem path on the NAS, not the SMB share name. See Quick Start step 1. |
+| `RSYNC_TIMEOUT` | Required (`120`) | Per-attempt rsync stall timeout, seconds. |
+| `MAX_TRANSFER_ATTEMPTS` | Required (`3`) | Bounded retry count for the NAS transfer. |
+| `REMOTE_SHA256SUM_CMD` | Optional (`sha256sum`) | Command on the NAS used for independent post-transfer verification. Set to `""` if the NAS shell doesn't have it. |
+
+### Retention and Sanity Checks
+
+| Variable | Required? | What It Controls |
+|---|---|---|
+| `RETENTION_DAYS` | Required (`30`) | How long dumps are kept on the NAS. See "Retention" below. |
+| `MIN_DUMP_SIZE_BYTES` | Required (`1048576`) | A dump smaller than this is treated as suspicious and rejected. Roughly half your smallest known-good dump size. |
+
+### Restore Only (`gitea-restore.sh`)
+
+| Variable | Required? | What It Controls |
+|---|---|---|
+| `RESTORE_STAGING_DIR` | Optional (`${STAGING_DIR}/restore`) | Local staging for fetched/extracted archives during a restore. Any path. |
+| `RESTORE_TIMEOUT` | Optional (`21600`) | Bounds each disruptive restore step. |
+| `DB_RESTORE_CMD` | Optional, blank by default | Real `--restore` DB import hook. See "Restore" below - deliberately not guessed at. |
+| `TEST_RESTORE_DB_CMD` | Optional, blank by default | `--test-restore`-only DB import hook, deliberately separate from `DB_RESTORE_CMD`. See "Restore" below. |
+| `RESTORE_TEST_CONTAINER_PREFIX` | Optional (`gitea-test-restore`) | Name prefix for the throwaway `--test-restore` container. |
+| `RESTORE_TEST_PORT` | Optional (`3080`) | Host port the throwaway `--test-restore` web UI is published on. |
+| `RESTORE_TEST_DATA_MOUNT` | Optional (`/data`) | Volume mount point used for `--test-restore`. Adjust if your image doesn't use a single `/data` volume. |
+| `RESTORE_TEST_IMAGE` | Optional, blank by default | Overrides which image `--test-restore` uses. Blank reuses whatever image the production container is currently running. |
+| `RESTORE_TEST_HEALTH_GRACE_SECONDS` | Optional (`60`) | How long to wait after starting a restored container before checking it's still running. |
+
+### Notifications
+
+| Variable | Required? | What It Controls |
+|---|---|---|
+| `NOTIFY_EMAIL` | Optional, blank by default | Recipient for failure alerts. Blank disables email entirely. See "Notifications" below. |
+| `MAIL_FROM` | Optional, blank by default | From address for alert emails. |
+| `HEARTBEAT_URL` | Optional, blank by default | Uptime Kuma (or similar) push monitor URL. See "Notifications" below. |
+
+### Logging
+
+| Variable | Required? | What It Controls |
+|---|---|---|
+| `LOG_FILE` | Optional (`/var/log/gitea-backup.log`) | Where both scripts log, in addition to stdout. Any writable path; leave blank to log to stdout only. |
 
 ## Quick Start
+
+The steps below deploy to the suggested default layout (`/etc/gitea-backup`,
+`/usr/local/bin`, `/var/...`). See "Configuration Reference" above if
+you'd rather use a different layout, such as keeping everything under
+one directory (e.g. `/opt/gitea-backup`) - the same steps apply, just
+with your own paths and `GITEA_BACKUP_CONF` set accordingly.
 
 ### 0. Get the Files
 
