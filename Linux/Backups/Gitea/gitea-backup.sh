@@ -2,31 +2,31 @@
 #
 # gitea-backup.sh
 # 2026-08-09
-# Version: v3.0.0
+# Version: v4.0.0
 #
 # PURPOSE:
 # Runs "gitea dump" inside a running Gitea container (repos + LFS + DB dump
-# + config in one archive), verifies the result, and ships it to a NAS via
-# SFTP for off-site/cloud backup. Gives an independent recovery path for
-# Gitea separate from the host's full-container-set backup.
+# + config in one archive), verifies the result, and ships it to a NAS.
+# Gives an independent recovery path for Gitea separate from the host's
+# full-container-set backup.
 #
-# Uses SFTP rather than rsync-over-SSH or the native rsync daemon: many NAS
-# platforms (Synology DSM confirmed) restrict full interactive SSH access
-# to administrator accounts, but expose SFTP as a separate service usable
-# by a normal, permission-scoped account. SFTP still runs over SSH (same
-# key, still encrypted in transit) but needs no remote command execution
-# capability, so a dedicated low-privilege account works without requiring
-# admin rights or a custom forced-command wrapper. See README.md's
-# "Transport" section for the full reasoning and the tradeoffs this
-# implies (no delta-transfer resume; remote integrity verification is an
-# optional, more expensive re-fetch instead of a cheap remote checksum).
+# The NAS transport is pluggable - set TRANSFER_METHOD in the config to
+# "sftp" (default), "rsync-ssh", or "rsync-daemon". See lib/transport.sh
+# for the implementation of each and README.md's "Transport" section for
+# how to choose. sftp is the default because many NAS platforms (Synology
+# DSM confirmed) restrict full interactive/command-execution SSH access -
+# what rsync-ssh needs - to administrator accounts, while SFTP is commonly
+# a separate, permission-scoped service usable by a normal least-privilege
+# account. rsync-ssh and rsync-daemon exist for targets where that
+# restriction does not apply, or where matching an existing rsync-based
+# setup matters more.
 #
 # USAGE:
 #   gitea-backup.sh                 Normal run
 #   gitea-backup.sh --dry-run       Run all checks and the dump, but do not
 #                                    transfer to the NAS or delete anything
 #   gitea-backup.sh --check         Dependency and pre-flight checks only
-#                                    (includes a live SFTP connectivity test)
+#                                    (includes a live NAS connectivity test)
 #
 # CONFIG:
 #   Reads /etc/gitea-backup/gitea-backup.conf by default. Override with
@@ -34,6 +34,7 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="${GITEA_BACKUP_CONF:-/etc/gitea-backup/gitea-backup.conf}"
 DRY_RUN=0
 CHECK_ONLY=0
@@ -113,36 +114,23 @@ send_heartbeat() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# SFTP helpers. sftp aborts a batch on the first failing command (get, put,
-# rm, ls, cd, ...) unless that line is prefixed with "-" - see sftp(1)
-# "BATCH FILES". Retention cleanup below deliberately uses that prefix so
-# one bad deletion doesn't stop the rest; every other use here wants the
-# default abort-on-error behavior so failure is detected immediately.
-# ---------------------------------------------------------------------------
-run_sftp_batch() {
-    timeout "$TRANSFER_TIMEOUT" sftp -b - "${SFTP_OPTS[@]}" "${NAS_SSH_USER}@${NAS_SSH_HOST}"
-}
-
 # Retention cleanup runs after the backup is already verified and safely
 # transferred. A transient failure here (a dropped connection, a slow NAS)
 # must not flip an already-successful backup run into a reported failure,
 # so this is deliberately non-fatal: log and move on rather than letting
 # the ERR trap fire. Uses each dump's own embedded timestamp (the
 # YYYYMMDD-HHMMSS in its filename) rather than remote file mtimes, since
-# SFTP-only access has no remote "delete files older than N days" command
-# the way a shell (find -mtime) would.
+# not every transport method (SFTP in particular) has a remote "delete
+# files older than N days" command the way a shell (find -mtime) would -
+# working from filenames keeps retention logic identical across every
+# TRANSFER_METHOD instead of needing its own per-method implementation.
 cleanup_nas_retention() {
     local listing now_epoch cutoff_epoch fname stamp file_epoch
     local -a old_files=()
-    if ! listing="$(run_sftp_batch <<SFTPEOF 2>&1
-cd "${NAS_REMOTE_PATH}"
-ls -1 gitea-dump-*.zip
-SFTPEOF
-)"; then
-        log WARN "Retention cleanup on NAS could not list files (backup itself already succeeded). Output: ${listing}"
+    listing="$(transport_list)" || {
+        log WARN "Retention cleanup on NAS could not list files (backup itself already succeeded)."
         return 0
-    fi
+    }
 
     now_epoch="$(date +%s)"
     cutoff_epoch=$(( now_epoch - RETENTION_DAYS * 86400 ))
@@ -160,18 +148,11 @@ SFTPEOF
     fi
 
     local out
-    out="$(
-        {
-            printf 'cd "%s"\n' "$NAS_REMOTE_PATH"
-            for fname in "${old_files[@]}"; do
-                printf -- '-rm "%s"\n' "$fname"
-            done
-        } | timeout "$TRANSFER_TIMEOUT" sftp -b - "${SFTP_OPTS[@]}" "${NAS_SSH_USER}@${NAS_SSH_HOST}" 2>&1
-    )" || true
+    out="$(transport_delete "${old_files[@]}" 2>&1)" || true
     for fname in "${old_files[@]}"; do
         log INFO "Deleted (retention, NAS): ${fname}"
     done
-    if [[ -n "$out" ]] && grep -qi 'not found\|permission denied\|failure' <<< "$out"; then
+    if [[ -n "$out" ]] && grep -qi 'not found\|permission denied\|failure\|error' <<< "$out"; then
         log WARN "Retention cleanup on NAS reported at least one problem (backup itself already succeeded). Output: ${out}"
     fi
     return 0
@@ -197,15 +178,14 @@ if [[ ! -f "$CONF_FILE" ]]; then
 fi
 conf_perm="$(stat -c '%a' "$CONF_FILE" 2>/dev/null || echo '000')"
 if [[ "$conf_perm" != "600" && "$conf_perm" != "640" ]]; then
-    echo "WARNING: ${CONF_FILE} has permissions ${conf_perm}. Recommend 600 (it can reference key paths)." >&2
+    echo "WARNING: ${CONF_FILE} has permissions ${conf_perm}. Recommend 600 (it can reference key/password paths)." >&2
 fi
 # shellcheck disable=SC1090
 source "$CONF_FILE"
 
 for required_var in GITEA_CONTAINER_NAME GITEA_CONTAINER_USER GITEA_APP_INI \
                      GITEA_CONTAINER_TMP STAGING_DIR STAGING_RETENTION_DAYS \
-                     NAS_SSH_HOST NAS_SSH_PORT NAS_SSH_USER NAS_SSH_KEY \
-                     NAS_KNOWN_HOSTS NAS_REMOTE_PATH TRANSFER_TIMEOUT \
+                     NAS_SSH_HOST NAS_REMOTE_PATH TRANSFER_TIMEOUT \
                      MAX_TRANSFER_ATTEMPTS RETENTION_DAYS MIN_DUMP_SIZE_BYTES; do
     if [[ -z "${!required_var:-}" ]]; then
         die "${required_var} is not set in ${CONF_FILE}"
@@ -213,11 +193,12 @@ for required_var in GITEA_CONTAINER_NAME GITEA_CONTAINER_USER GITEA_APP_INI \
 done
 
 # Numeric config values feed directly into arithmetic contexts and command
-# arguments (timeouts, retry counts, port numbers). A malformed value here
-# should fail clearly at load time, not as a cryptic bash arithmetic error
-# deep into a run.
+# arguments (timeouts, retry counts). A malformed value here should fail
+# clearly at load time, not as a cryptic bash arithmetic error deep into a
+# run. (Transport-specific numeric values, e.g. NAS_SSH_PORT, are validated
+# by transport_validate_config below instead.)
 for numeric_var in TRANSFER_TIMEOUT MAX_TRANSFER_ATTEMPTS RETENTION_DAYS \
-                    STAGING_RETENTION_DAYS MIN_DUMP_SIZE_BYTES NAS_SSH_PORT; do
+                    STAGING_RETENTION_DAYS MIN_DUMP_SIZE_BYTES; do
     if ! [[ "${!numeric_var}" =~ ^[0-9]+$ ]]; then
         die "${numeric_var}='${!numeric_var}' in ${CONF_FILE} is not a positive integer."
     fi
@@ -230,6 +211,10 @@ if ! [[ "$DUMP_TIMEOUT" =~ ^[0-9]+$ ]]; then
     die "DUMP_TIMEOUT='${DUMP_TIMEOUT}' in ${CONF_FILE} is not a positive integer (seconds)."
 fi
 
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/transport.sh"
+transport_validate_config
+
 # ---------------------------------------------------------------------------
 # Dependency check (all up front, one pass)
 # ---------------------------------------------------------------------------
@@ -239,11 +224,16 @@ declare -A REQUIRED_PKGS=(
     [unzip]="unzip"
     [sha256sum]="coreutils"
     [curl]="curl"
-    [sftp]="openssh-client"
-    [ssh]="openssh-client"
     [flock]="util-linux"
     [timeout]="coreutils"
 )
+while IFS= read -r cmd; do
+    [[ -z "$cmd" ]] && continue
+    case "$cmd" in
+        rsync) REQUIRED_PKGS[rsync]="rsync" ;;
+        ssh|sftp) REQUIRED_PKGS[$cmd]="openssh-client" ;;
+    esac
+done < <(transport_required_cmds)
 missing_cmds=()
 for cmd in "${!REQUIRED_PKGS[@]}"; do
     command -v "$cmd" >/dev/null 2>&1 || missing_cmds+=("$cmd")
@@ -268,35 +258,11 @@ if [[ "$running" != "true" ]]; then
     die "Container '${GITEA_CONTAINER_NAME}' is not running (or docker itself is unreachable)."
 fi
 
-FAILED_CONTEXT="Pre-flight: SSH key checks"
-if [[ ! -f "$NAS_SSH_KEY" ]]; then
-    die "SSH key not found: ${NAS_SSH_KEY}"
+FAILED_CONTEXT="Pre-flight: NAS connectivity and remote path check (TRANSFER_METHOD=${TRANSFER_METHOD})"
+if ! transport_check_write; then
+    die "Cannot reach ${NAS_SSH_HOST} over ${TRANSFER_METHOD}, or ${NAS_REMOTE_PATH} does not exist / is not writable. Confirm the actual filesystem path on the NAS - the SMB share name is not the same as the filesystem path."
 fi
-key_perm="$(stat -c '%a' "$NAS_SSH_KEY")"
-if [[ "$key_perm" != "600" && "$key_perm" != "400" ]]; then
-    die "SSH key ${NAS_SSH_KEY} has permissions ${key_perm}, expected 600 or 400. Refusing to use it: 'chmod 600 ${NAS_SSH_KEY}'."
-fi
-if [[ ! -f "$NAS_KNOWN_HOSTS" ]]; then
-    die "known_hosts file not found: ${NAS_KNOWN_HOSTS}. Pre-seed it with: ssh-keyscan -p ${NAS_SSH_PORT} ${NAS_SSH_HOST} > ${NAS_KNOWN_HOSTS}"
-fi
-
-# Built once, reused for every SFTP call.
-SFTP_OPTS=(-i "$NAS_SSH_KEY" -P "$NAS_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$NAS_KNOWN_HOSTS")
-
-FAILED_CONTEXT="Pre-flight: SFTP connectivity and remote path check"
-PREFLIGHT_PROBE="$(mktemp)"
-: > "$PREFLIGHT_PROBE"
-if ! run_sftp_batch <<SFTPEOF >/dev/null 2>&1
-cd "${NAS_REMOTE_PATH}"
-put "${PREFLIGHT_PROBE}" .gitea-backup-write-test
-rm .gitea-backup-write-test
-SFTPEOF
-then
-    rm -f "$PREFLIGHT_PROBE"
-    die "Cannot reach ${NAS_SSH_HOST} as ${NAS_SSH_USER} over SFTP, or ${NAS_REMOTE_PATH} does not exist / is not writable. Confirm the actual filesystem path on the NAS - the SMB share name is not the same as the filesystem path."
-fi
-rm -f "$PREFLIGHT_PROBE"
-log INFO "Confirmed SFTP access and write permission to ${NAS_SSH_HOST}:${NAS_REMOTE_PATH}"
+log INFO "Confirmed ${TRANSFER_METHOD} access and write permission to ${NAS_SSH_HOST}:${NAS_REMOTE_PATH}"
 
 FAILED_CONTEXT="Pre-flight: staging directory"
 mkdir -p "$STAGING_DIR"
@@ -387,64 +353,50 @@ if (( DRY_RUN )); then
 fi
 
 # ---------------------------------------------------------------------------
-# Transfer to NAS via SFTP (bounded retries). Each attempt uploads the full
-# file - SFTP's "put" has no delta/resume equivalent to rsync's --partial,
-# so a retry after a partial failure re-uploads from scratch rather than
-# resuming. Acceptable tradeoff for the least-privilege access this trades
-# up for; see README.md "Transport".
+# Transfer to NAS (bounded retries). Each attempt re-transfers the whole
+# file - only rsync-ssh's --partial gives real mid-transfer resume; sftp
+# and rsync-daemon here do not. Acceptable since this ships one full new
+# file per run, not an incremental sync of an existing large tree.
 # ---------------------------------------------------------------------------
-FAILED_CONTEXT="Transferring dump to NAS via SFTP"
+FAILED_CONTEXT="Transferring dump to NAS (TRANSFER_METHOD=${TRANSFER_METHOD})"
 transfer_attempt=1
 transfer_ok=0
 while (( transfer_attempt <= MAX_TRANSFER_ATTEMPTS )); do
-    if run_sftp_batch <<SFTPEOF
-cd "${NAS_REMOTE_PATH}"
-put "${STAGED_FILE}" "${DUMP_NAME}"
-SFTPEOF
-    then
+    if transport_upload "$STAGED_FILE" "$DUMP_NAME"; then
         transfer_ok=1
         break
     fi
-    log WARN "SFTP transfer attempt ${transfer_attempt}/${MAX_TRANSFER_ATTEMPTS} failed."
+    log WARN "Transfer attempt ${transfer_attempt}/${MAX_TRANSFER_ATTEMPTS} failed."
     (( transfer_attempt < MAX_TRANSFER_ATTEMPTS )) && sleep $(( transfer_attempt * 10 ))
     (( transfer_attempt++ ))
 done
 if (( ! transfer_ok )); then
-    die "SFTP transfer failed after ${MAX_TRANSFER_ATTEMPTS} attempts."
+    die "Transfer failed after ${MAX_TRANSFER_ATTEMPTS} attempts."
 fi
 log INFO "Transferred to ${NAS_SSH_HOST}:${NAS_REMOTE_PATH}/${DUMP_NAME}"
 
 # ---------------------------------------------------------------------------
-# Independent post-transfer verification. Unlike rsync, plain SFTP has no
-# remote checksum command available (that would require shell command
-# execution, which a least-privilege SFTP-only account does not have), so
-# the only way to independently verify the bytes landed correctly is to
-# re-fetch the file and compare checksums locally - real bandwidth/time
-# cost, which is why this is optional and off by default. See
+# Independent post-transfer verification. Optional and off by default: the
+# only universal way to independently verify the bytes landed correctly
+# across every TRANSFER_METHOD is to re-fetch the file and compare
+# checksums locally, which doubles the transfer time/bandwidth. See
 # VERIFY_TRANSFER in the config.
 # ---------------------------------------------------------------------------
 FAILED_CONTEXT="Verifying transferred dump on NAS"
 if [[ "${VERIFY_TRANSFER:-}" == "yes" ]]; then
     VERIFY_TMP="$(mktemp)"
-    if run_sftp_batch <<SFTPEOF >/dev/null 2>&1
-cd "${NAS_REMOTE_PATH}"
-get "${DUMP_NAME}" "${VERIFY_TMP}"
-SFTPEOF
-    then
+    if transport_download "$DUMP_NAME" "$VERIFY_TMP" >/dev/null 2>&1; then
         SOURCE_SUM="$(sha256sum "$STAGED_FILE" | awk '{print $1}')"
         FETCHED_SUM="$(sha256sum "$VERIFY_TMP" | awk '{print $1}')"
         rm -f "$VERIFY_TMP"
         if [[ "$SOURCE_SUM" != "$FETCHED_SUM" ]]; then
-            run_sftp_batch <<SFTPEOF >/dev/null 2>&1 || true
-cd "${NAS_REMOTE_PATH}"
-rm "${DUMP_NAME}"
-SFTPEOF
+            transport_delete "$DUMP_NAME" >/dev/null 2>&1 || true
             die "Checksum mismatch after transfer (Source=${SOURCE_SUM} Fetched-back=${FETCHED_SUM}). Bad copy removed from NAS."
         fi
         log INFO "Transfer verified by re-fetch and checksum comparison: ${SOURCE_SUM}"
     else
         rm -f "$VERIFY_TMP"
-        log WARN "Could not re-fetch ${DUMP_NAME} for verification (non-fatal - the file was already confirmed uploaded by the successful SFTP put)."
+        log WARN "Could not re-fetch ${DUMP_NAME} for verification (non-fatal - the file was already confirmed uploaded)."
     fi
 else
     log INFO "VERIFY_TRANSFER is not enabled; skipping independent post-transfer verification (this would re-download the full file - see README)."

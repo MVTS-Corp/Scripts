@@ -2,7 +2,7 @@
 #
 # gitea-restore.sh
 # 2026-08-09
-# Version: v2.0.0
+# Version: v3.0.0
 #
 # PURPOSE:
 # Restores a Gitea instance from an archive produced by gitea-backup.sh
@@ -22,10 +22,9 @@
 # --test-restore only) TEST_RESTORE_DB_CMD in the config to automate that
 # step too - see gitea-backup.conf.
 #
-# Fetches over SFTP, not rsync-over-SSH or the native rsync daemon - see
-# gitea-backup.sh's header for why (many NAS platforms restrict full SSH
-# access to admin accounts; SFTP is a separate, permission-scoped service
-# that still runs over SSH and needs no remote command execution).
+# Fetches via the same pluggable transport as gitea-backup.sh
+# (TRANSFER_METHOD in the config - "sftp", "rsync-ssh", or "rsync-daemon");
+# see lib/transport.sh and README.md's "Transport" section.
 #
 # WHAT --test-restore DOES AND DOES NOT PROVE:
 # --test-restore always runs against a brand-new container on an isolated
@@ -69,6 +68,7 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="${GITEA_BACKUP_CONF:-/etc/gitea-backup/gitea-backup.conf}"
 MODE=""
 ARCHIVE_NAME=""
@@ -178,16 +178,14 @@ fi
 source "$CONF_FILE"
 
 for required_var in GITEA_CONTAINER_NAME GITEA_APP_INI GITEA_REPO_ROOT \
-                     STAGING_DIR NAS_SSH_HOST NAS_SSH_PORT NAS_SSH_USER \
-                     NAS_SSH_KEY NAS_KNOWN_HOSTS NAS_REMOTE_PATH \
+                     STAGING_DIR NAS_SSH_HOST NAS_REMOTE_PATH \
                      TRANSFER_TIMEOUT MAX_TRANSFER_ATTEMPTS MIN_DUMP_SIZE_BYTES; do
     if [[ -z "${!required_var:-}" ]]; then
         die "${required_var} is not set in ${CONF_FILE}"
     fi
 done
 
-for numeric_var in TRANSFER_TIMEOUT MAX_TRANSFER_ATTEMPTS MIN_DUMP_SIZE_BYTES \
-                    NAS_SSH_PORT; do
+for numeric_var in TRANSFER_TIMEOUT MAX_TRANSFER_ATTEMPTS MIN_DUMP_SIZE_BYTES; do
     if ! [[ "${!numeric_var}" =~ ^[0-9]+$ ]]; then
         die "${numeric_var}='${!numeric_var}' in ${CONF_FILE} is not a positive integer."
     fi
@@ -207,6 +205,10 @@ done
 
 APP_DATA_ROOT="$(dirname "$(dirname "$GITEA_APP_INI")")"
 
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/transport.sh"
+transport_validate_config
+
 # ---------------------------------------------------------------------------
 # Dependency check (all up front, one pass)
 # ---------------------------------------------------------------------------
@@ -215,11 +217,16 @@ declare -A REQUIRED_PKGS=(
     [docker]="docker.io"
     [unzip]="unzip"
     [curl]="curl"
-    [sftp]="openssh-client"
-    [ssh]="openssh-client"
     [flock]="util-linux"
     [timeout]="coreutils"
 )
+while IFS= read -r cmd; do
+    [[ -z "$cmd" ]] && continue
+    case "$cmd" in
+        rsync) REQUIRED_PKGS[rsync]="rsync" ;;
+        ssh|sftp) REQUIRED_PKGS[$cmd]="openssh-client" ;;
+    esac
+done < <(transport_required_cmds)
 missing_cmds=()
 for cmd in "${!REQUIRED_PKGS[@]}"; do
     command -v "$cmd" >/dev/null 2>&1 || missing_cmds+=("$cmd")
@@ -235,35 +242,14 @@ if [[ -n "${NOTIFY_EMAIL:-}" ]] && ! command -v mail >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# Pre-flight: SSH key checks + NAS connectivity (not required for a
-# --local-file run, but cheap and worth doing before the disruptive modes)
+# Pre-flight: NAS connectivity (not required for a --local-file run, but
+# cheap and worth doing before the disruptive modes)
 # ---------------------------------------------------------------------------
-FAILED_CONTEXT="Pre-flight: SSH key checks"
-if [[ ! -f "$NAS_SSH_KEY" ]]; then
-    die "SSH key not found: ${NAS_SSH_KEY}"
+FAILED_CONTEXT="Pre-flight: NAS connectivity and remote path check (TRANSFER_METHOD=${TRANSFER_METHOD})"
+if ! transport_check_read; then
+    die "Cannot reach ${NAS_SSH_HOST} over ${TRANSFER_METHOD}, or ${NAS_REMOTE_PATH} does not exist / is not readable."
 fi
-key_perm="$(stat -c '%a' "$NAS_SSH_KEY")"
-if [[ "$key_perm" != "600" && "$key_perm" != "400" ]]; then
-    die "SSH key ${NAS_SSH_KEY} has permissions ${key_perm}, expected 600 or 400. Refusing to use it: 'chmod 600 ${NAS_SSH_KEY}'."
-fi
-if [[ ! -f "$NAS_KNOWN_HOSTS" ]]; then
-    die "known_hosts file not found: ${NAS_KNOWN_HOSTS}."
-fi
-SFTP_OPTS=(-i "$NAS_SSH_KEY" -P "$NAS_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$NAS_KNOWN_HOSTS")
-
-run_sftp_batch() {
-    timeout "$TRANSFER_TIMEOUT" sftp -b - "${SFTP_OPTS[@]}" "${NAS_SSH_USER}@${NAS_SSH_HOST}"
-}
-
-FAILED_CONTEXT="Pre-flight: SFTP connectivity and remote path check"
-if ! run_sftp_batch <<SFTPEOF >/dev/null 2>&1
-cd "${NAS_REMOTE_PATH}"
-ls
-SFTPEOF
-then
-    die "Cannot reach ${NAS_SSH_HOST} as ${NAS_SSH_USER} over SFTP, or ${NAS_REMOTE_PATH} does not exist / is not readable."
-fi
-log INFO "Confirmed SFTP access to ${NAS_SSH_HOST}:${NAS_REMOTE_PATH}"
+log INFO "Confirmed ${TRANSFER_METHOD} access to ${NAS_SSH_HOST}:${NAS_REMOTE_PATH}"
 
 FAILED_CONTEXT="Pre-flight: docker reachability"
 # Unlike gitea-backup.sh, restore does NOT require GITEA_CONTAINER_NAME to
@@ -284,10 +270,7 @@ fi
 # List available archives
 # ---------------------------------------------------------------------------
 list_archives() {
-    run_sftp_batch <<SFTPEOF 2>/dev/null | grep -E '^gitea-dump-[0-9]{8}-[0-9]{6}\.zip$' | sort || true
-cd "${NAS_REMOTE_PATH}"
-ls -1 gitea-dump-*.zip
-SFTPEOF
+    transport_list | sort
 }
 
 if [[ "$MODE" == "list" ]]; then
@@ -334,23 +317,19 @@ else
     fi
     ARCHIVE_LOCAL_PATH="${RESTORE_STAGING_DIR}/${ARCHIVE_NAME}"
 
-    # SFTP's "get" has no delta/resume equivalent to rsync's --partial, so a
-    # retry after a partial failure re-fetches from scratch. See
-    # gitea-backup.sh's transfer step / README.md "Transport" for why this
-    # tradeoff was accepted.
+    # Each retry re-fetches the whole file from scratch - only rsync-ssh's
+    # --partial gives real mid-transfer resume. See gitea-backup.sh's
+    # transfer step / README.md "Transport" for why this tradeoff was
+    # accepted.
     FAILED_CONTEXT="Fetching archive from NAS"
     fetch_attempt=1
     fetch_ok=0
     while (( fetch_attempt <= MAX_TRANSFER_ATTEMPTS )); do
-        if run_sftp_batch <<SFTPEOF
-cd "${NAS_REMOTE_PATH}"
-get "${ARCHIVE_NAME}" "${ARCHIVE_LOCAL_PATH}"
-SFTPEOF
-        then
+        if transport_download "$ARCHIVE_NAME" "$ARCHIVE_LOCAL_PATH"; then
             fetch_ok=1
             break
         fi
-        log WARN "SFTP fetch attempt ${fetch_attempt}/${MAX_TRANSFER_ATTEMPTS} failed."
+        log WARN "Fetch attempt ${fetch_attempt}/${MAX_TRANSFER_ATTEMPTS} failed."
         (( fetch_attempt < MAX_TRANSFER_ATTEMPTS )) && sleep $(( fetch_attempt * 10 ))
         (( fetch_attempt++ ))
     done
