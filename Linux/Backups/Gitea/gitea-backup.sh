@@ -2,9 +2,17 @@
 #
 # gitea-backup.sh
 # 2026-08-11
-# Version: v4.0.2
+# Version: v4.0.3
 #
 # CHANGELOG:
+#   v4.0.3 - send_mail_raw() now checks 'mail' is actually installed
+#            before attempting to use it, instead of blindly retrying 3
+#            times (up to 15s of backoff sleep, plus raw "timeout: failed
+#            to run command 'mail'" spam on stderr) against a command
+#            already known to be missing - the dependency check earlier
+#            in this script already detects and warns about this exact
+#            case, so a later failure notification attempt had no way to
+#            succeed and was only wasting time during every `die()` call.
 #   v4.0.2 - Default config path changed from /etc/gitea-backup to
 #            /opt/gitea-backup, so a real deployment doesn't have to
 #            juggle two directories for one tool - everything (scripts,
@@ -90,6 +98,10 @@ send_mail_raw() {
     local subject="$1" body="$2"
     local max_attempts=3 attempt=1
     [[ -z "${NOTIFY_EMAIL:-}" ]] && return 0
+    if ! command -v mail >/dev/null 2>&1; then
+        log WARN "NOTIFY_EMAIL is set but 'mail' command is not installed; skipping email alert (not retrying - it cannot succeed without the command)."
+        return 1
+    fi
     while (( attempt <= max_attempts )); do
         if echo "$body" | timeout 30 mail -s "$subject" -r "${MAIL_FROM:-gitea-backup@localhost}" "$NOTIFY_EMAIL"; then
             return 0
