@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 #
 # gitea-restore.sh
-# 2026-08-09
-# Version: v3.0.0
+# 2026-08-10
+# Version: v3.0.1
+#
+# CHANGELOG:
+#   v3.0.1 - Bounded every "docker inspect/stop/start/cp/run/rm/volume"
+#            call with a timeout (an unresponsive docker daemon could
+#            previously hang this script indefinitely, including inside
+#            the EXIT-trap teardown for --test-restore).
 #
 # PURPOSE:
 # Restores a Gitea instance from an archive produced by gitea-backup.sh
@@ -401,7 +407,7 @@ health_check() {
         sleep 5
         waited=$(( waited + 5 ))
         local state
-        state="$(docker inspect -f '{{.State.Running}}' "$target" 2>/dev/null || echo false)"
+        state="$(timeout 15 docker inspect -f '{{.State.Running}}' "$target" 2>/dev/null || echo false)"
         if [[ "$state" != "true" ]]; then
             die "${target} is not running after restore (crashed or exited). Check: docker logs ${target}"
         fi
@@ -428,7 +434,7 @@ restore_pipeline() {
     local target="$1" db_hook="$2" http_port="${3:-}"
 
     local image
-    image="$(docker inspect -f '{{.Config.Image}}' "$target" 2>/dev/null || echo "")"
+    image="$(timeout 15 docker inspect -f '{{.Config.Image}}' "$target" 2>/dev/null || echo "")"
     [[ -z "$image" ]] && die "Could not determine the image in use by container '${target}'."
 
     FAILED_CONTEXT="Stopping ${target} before restore"
@@ -449,10 +455,10 @@ restore_pipeline() {
 
     FAILED_CONTEXT="Copying restored data into ${target}"
     if [[ -d "${EXTRACT_DIR}/repo-root" ]] && [[ -n "$(ls -A "${EXTRACT_DIR}/repo-root" 2>/dev/null)" ]]; then
-        docker cp "${EXTRACT_DIR}/repo-root/." "${target}:${GITEA_REPO_ROOT}/" \
+        timeout "$RESTORE_TIMEOUT" docker cp "${EXTRACT_DIR}/repo-root/." "${target}:${GITEA_REPO_ROOT}/" \
             || die "Failed to copy restored repositories into ${target}. It is stopped with the pre-restore data preserved as *.${suffix} - safe to investigate."
     fi
-    docker cp "${EXTRACT_DIR}/app-data-root/." "${target}:${APP_DATA_ROOT}/" \
+    timeout "$RESTORE_TIMEOUT" docker cp "${EXTRACT_DIR}/app-data-root/." "${target}:${APP_DATA_ROOT}/" \
         || die "Failed to copy restored app data into ${target}. It is stopped with the pre-restore data preserved as *.${suffix} - safe to investigate."
     log INFO "Restored repository and app data copied into ${target}."
 
@@ -488,21 +494,21 @@ if [[ "$MODE" == "test-restore" ]]; then
 
     teardown_test() {
         log INFO "Tearing down test-restore container and volume..."
-        docker rm -f "$TEST_NAME" >/dev/null 2>&1 || true
-        docker volume rm "$TEST_VOLUME" >/dev/null 2>&1 || true
+        timeout 15 docker rm -f "$TEST_NAME" >/dev/null 2>&1 || true
+        timeout 15 docker volume rm "$TEST_VOLUME" >/dev/null 2>&1 || true
         rm -rf "$EXTRACT_DIR"
     }
     trap teardown_test EXIT
 
     FAILED_CONTEXT="Resolving image for test-restore"
-    PROD_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$GITEA_CONTAINER_NAME" 2>/dev/null || echo "")"
+    PROD_IMAGE="$(timeout 15 docker inspect -f '{{.Config.Image}}' "$GITEA_CONTAINER_NAME" 2>/dev/null || echo "")"
     TEST_IMAGE="${RESTORE_TEST_IMAGE:-$PROD_IMAGE}"
     [[ -z "$TEST_IMAGE" ]] && die "Could not resolve an image for the test-restore container. Set RESTORE_TEST_IMAGE explicitly, or ensure ${GITEA_CONTAINER_NAME} exists so its image can be reused."
 
     FAILED_CONTEXT="Creating isolated test-restore container"
     log INFO "Creating isolated test-restore container ${TEST_NAME} from ${TEST_IMAGE} (own volume, own network - never production's)."
-    docker volume create "$TEST_VOLUME" >/dev/null
-    docker run -d --name "$TEST_NAME" \
+    timeout 15 docker volume create "$TEST_VOLUME" >/dev/null
+    timeout 30 docker run -d --name "$TEST_NAME" \
         -v "${TEST_VOLUME}:${RESTORE_TEST_DATA_MOUNT}" \
         -p "${RESTORE_TEST_PORT}:3000" \
         "$TEST_IMAGE" >/dev/null \

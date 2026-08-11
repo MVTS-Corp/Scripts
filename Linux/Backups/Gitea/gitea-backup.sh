@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 #
 # gitea-backup.sh
-# 2026-08-09
-# Version: v4.0.0
+# 2026-08-10
+# Version: v4.0.1
+#
+# CHANGELOG:
+#   v4.0.1 - Bounded every "docker inspect/exec" call with a timeout (an
+#            unresponsive docker daemon could previously hang this script
+#            indefinitely, including inside the EXIT-trap cleanup handler).
 #
 # PURPOSE:
 # Runs "gitea dump" inside a running Gitea container (repos + LFS + DB dump
@@ -253,7 +258,7 @@ fi
 # Pre-flight checks
 # ---------------------------------------------------------------------------
 FAILED_CONTEXT="Pre-flight: container running check"
-running="$(docker inspect -f '{{.State.Running}}' "$GITEA_CONTAINER_NAME" 2>/dev/null || echo false)"
+running="$(timeout 15 docker inspect -f '{{.State.Running}}' "$GITEA_CONTAINER_NAME" 2>/dev/null || echo false)"
 if [[ "$running" != "true" ]]; then
     die "Container '${GITEA_CONTAINER_NAME}' is not running (or docker itself is unreachable)."
 fi
@@ -308,16 +313,16 @@ CONTAINER_DUMP_PATH="${GITEA_CONTAINER_TMP}/${DUMP_NAME}"
 # guaranteed (pkill may be absent from a minimal Gitea image), which is why
 # it is "|| true" throughout and a real failure still exits loudly via die().
 cleanup_container_scratch() {
-    docker exec -u "$GITEA_CONTAINER_USER" "$GITEA_CONTAINER_NAME" \
+    timeout 15 docker exec -u "$GITEA_CONTAINER_USER" "$GITEA_CONTAINER_NAME" \
         pkill -f "gitea dump -c ${GITEA_APP_INI}" >/dev/null 2>&1 || true
-    docker exec -u "$GITEA_CONTAINER_USER" "$GITEA_CONTAINER_NAME" \
+    timeout 15 docker exec -u "$GITEA_CONTAINER_USER" "$GITEA_CONTAINER_NAME" \
         rm -f "$CONTAINER_DUMP_PATH" >/dev/null 2>&1 || true
 }
 trap cleanup_container_scratch EXIT
 
 FAILED_CONTEXT="Running gitea dump inside container"
 log INFO "Starting gitea dump (container=${GITEA_CONTAINER_NAME}, timeout=${DUMP_TIMEOUT}s)."
-docker exec -u "$GITEA_CONTAINER_USER" "$GITEA_CONTAINER_NAME" mkdir -p "$GITEA_CONTAINER_TMP"
+timeout 15 docker exec -u "$GITEA_CONTAINER_USER" "$GITEA_CONTAINER_NAME" mkdir -p "$GITEA_CONTAINER_TMP"
 if ! timeout "$DUMP_TIMEOUT" docker exec -u "$GITEA_CONTAINER_USER" "$GITEA_CONTAINER_NAME" \
     gitea dump -c "$GITEA_APP_INI" --type zip -f "$CONTAINER_DUMP_PATH"; then
     die "gitea dump did not complete within DUMP_TIMEOUT (${DUMP_TIMEOUT}s), or failed outright. If this is a large instance that legitimately needs longer, raise DUMP_TIMEOUT in ${CONF_FILE}. Check inside the container for a still-running or orphaned dump process."
