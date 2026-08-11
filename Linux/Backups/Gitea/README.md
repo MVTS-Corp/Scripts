@@ -1,4 +1,4 @@
-README.md v4.1.0 (Last Rev: 2026-08-11)
+README.md v4.2.0 (Last Rev: 2026-08-11)
 
 # Gitea Backup and Restore
 
@@ -287,7 +287,10 @@ one actually applies. This step is only needed if you plan to use
 (for example `gitea-backup`) whose permissions are restricted to
 read/write on the Gitea backup folder only, with no access to other
 shares. Do not use an admin account. On Synology this is done through
-Control Panel > User & Group > permissions, per shared folder.
+Control Panel > User & Group > permissions, per shared folder. Whatever
+username you create, use that exact spelling and case for `NAS_SSH_USER`
+in the config - SSH account names are case-sensitive, and a mismatched
+case reads as a completely different (nonexistent) account.
 
 **Synology-specific:** DSM restricts full interactive SSH login to
 accounts in the administrators group - a non-admin account will accept
@@ -334,11 +337,41 @@ sudo chmod 600 /opt/gitea-backup/id_ed25519_gitea-backup
 sudo chmod 644 /opt/gitea-backup/id_ed25519_gitea-backup.pub
 ```
 
-Install the public key on the NAS for the `gitea-backup` account (DSM:
-User & Group > the user > Advanced/SSH public key, or append to that
-account's `~/.ssh/authorized_keys` if managed manually). Everything after
-`-C` in the `ssh-keygen` command is just a label (the key's comment field)
-- it has no effect on authentication and can be anything, or omitted.
+Install the public key on the NAS for the dedicated account. Recent DSM 7
+releases removed the old per-user "Advanced > SSH Public Key" GUI option
+(if your DSM still has it, use it and skip the rest of this paragraph) -
+where it's gone, add it to `authorized_keys` directly instead. This needs
+a real admin-group SSH session (not the dedicated account itself, which
+by design can't get one - see step 2), and User Home Service enabled
+first (Control Panel > User & Group > Advanced > User Home):
+
+```bash
+ssh <admin-account>@<nas-host>
+sudo mkdir -p <home-dir-of-dedicated-account>/.ssh
+sudo nano <home-dir-of-dedicated-account>/.ssh/authorized_keys   # paste the .pub file's contents, save
+sudo chown -R <dedicated-account>:users <home-dir-of-dedicated-account>/.ssh
+sudo chmod 700 <home-dir-of-dedicated-account>/.ssh
+sudo chmod 600 <home-dir-of-dedicated-account>/.ssh/authorized_keys
+sudo chmod 750 <home-dir-of-dedicated-account>
+```
+
+That last `chmod` on the home directory itself (not just `.ssh`) matters:
+DSM's default "homes" shared folder ACL leaves new home directories
+world-writable, and OpenSSH's `StrictModes` setting (on by default)
+silently refuses pubkey auth - no useful log line, just a generic
+rejection - if the home directory is writable by anyone but its owner,
+even when `.ssh` and `authorized_keys` themselves are permissioned
+correctly. If key auth still fails after installing the key, this is the
+first thing to check. On Synology specifically, the home directory's
+real path is commonly reachable through several names that all point at
+the same place (e.g. `/var/services/homes/<user>`, `/volume<N>/homes/<user>`,
+and a `homes` share visible over SFTP/SMB) - use whichever one your admin
+shell actually shows as real, `/var/services/homes/<user>` is the one
+DSM's own sshd resolves a user's home from.
+
+Everything after `-C` in the `ssh-keygen` command above is just a label
+(the key's comment field) - it has no effect on authentication and can
+be anything, or omitted.
 
 **Recommended hardening:** add these SSH options in front of the key in
 `authorized_keys` (comma-separated, no spaces around the commas):
@@ -363,9 +396,22 @@ run whatever it's permitted to run.
 If your account still can't connect at all after installing the key (same
 symptom as above: connects, then closes with no error), it's not yet in
 whatever group/permission the NAS requires for the method you're using
-either - double check step 2, or test directly:
-`sftp -i <key> <user>@<host>` (for `sftp`) is a more direct test than a
-full shell attempt.
+either - double check step 2.
+
+**Test with the exact same options the scripts actually use, not a plain
+`sftp` command** - a plain `sftp -i <key> <user>@<host>` will silently
+fall back to a password prompt if key auth fails, which can make a
+broken key setup look like it's working (you type the password, it
+connects, and you conclude the key is fine when it never actually got
+used). The scripts always connect with `BatchMode=yes` (fail immediately
+on any auth problem, never prompt), so that's what to test with too:
+
+```bash
+sftp -i <key> -P <port> -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<known_hosts path> <user>@<host>
+```
+
+Landing at an `sftp>` prompt with **no password prompt at all** is the
+only result that actually confirms the scripts will work.
 
 ### 4. Pre-Seed the Known Hosts File (`sftp` / `rsync-ssh` only)
 
@@ -547,7 +593,22 @@ NAS yet (or wasn't added correctly) - see Quick Start step 3. A password
 prompt succeeding confirms the account and network path are fine; it's
 specifically key-based auth that isn't wired up yet, which the actual
 scripts require (`BatchMode=yes` - they never prompt for a password, they
-just fail if the key doesn't work).
+just fail if the key doesn't work). Important: if you answer that
+password prompt, the connection will succeed - which can make a broken
+key setup look fine, since you never find out the key itself didn't
+work. Always test with `-o BatchMode=yes` explicitly (see Quick Start
+step 3's testing note) to get an honest answer.
+
+**Key is correctly installed in `authorized_keys` but `-o BatchMode=yes`
+still gets "Permission denied (publickey,password)", with nothing useful
+in the NAS's own logs** - check the permissions on the account's home
+directory itself, not just `.ssh`/`authorized_keys`. OpenSSH's
+`StrictModes` setting (on by default) silently refuses pubkey auth if
+the home directory is writable by anyone but its owner - on Synology
+this is a common trap, since DSM's default "homes" shared folder ACL
+leaves new home directories world-writable (`drwxrwxrwx`). Fix:
+`sudo chmod 750 <home-dir-of-dedicated-account>`, then retest. See Quick
+Start step 3 for the full explanation.
 
 **SSH key works interactively but the dedicated backup account's session
 closes immediately after the password/key, with no error** - on Synology
