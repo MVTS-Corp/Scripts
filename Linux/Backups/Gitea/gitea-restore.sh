@@ -2,9 +2,20 @@
 #
 # gitea-restore.sh
 # 2026-08-11
-# Version: v3.0.3
+# Version: v3.0.4
 #
 # CHANGELOG:
+#   v3.0.4 - Fixed archive integrity check and extraction to match what
+#            "gitea dump" actually produces: a real, live archive from
+#            a real deployment contains repos/ and data/ as plain
+#            directory trees directly in the outer zip, not nested
+#            gitea-repo.zip/gitea-data.zip sub-archives as previously
+#            assumed - every --test-restore/--restore against a real
+#            archive was failing archive verification with "does not
+#            contain expected gitea-data.zip". The nested-unzip step is
+#            gone entirely; repos/ and data/ are now just renamed to the
+#            internal repo-root/app-data-root directories this script
+#            already uses downstream.
 #   v3.0.3 - send_mail_raw() now checks 'mail' is actually installed
 #            before attempting to use it, instead of blindly retrying 3
 #            times (up to 15s of backoff sleep, plus raw "timeout: failed
@@ -373,13 +384,13 @@ if ! unzip -tq "$ARCHIVE_LOCAL_PATH" >/dev/null; then
     die "Archive failed zip integrity check: ${ARCHIVE_LOCAL_PATH}"
 fi
 archive_listing="$(unzip -l "$ARCHIVE_LOCAL_PATH")"
-for inner in gitea-db.sql gitea-data.zip; do
+for inner in gitea-db.sql data/; do
     if ! grep -q "$inner" <<< "$archive_listing"; then
         die "Archive ${ARCHIVE_NAME} does not contain expected ${inner}. This does not look like a gitea dump archive."
     fi
 done
-if ! grep -q "gitea-repo.zip" <<< "$archive_listing"; then
-    log WARN "Archive does not contain gitea-repo.zip (expected for an instance with zero repositories; otherwise this is unexpected)."
+if ! grep -q "repos/" <<< "$archive_listing"; then
+    log WARN "Archive does not contain a repos/ directory (expected for an instance with zero repositories; otherwise this is unexpected)."
 fi
 log INFO "Archive verified: ${ARCHIVE_LOCAL_PATH} (${archive_size} bytes)."
 
@@ -399,14 +410,18 @@ mkdir -p "$EXTRACT_DIR"
 if ! timeout "$RESTORE_TIMEOUT" unzip -q "$ARCHIVE_LOCAL_PATH" -d "$EXTRACT_DIR"; then
     die "Failed to extract ${ARCHIVE_LOCAL_PATH} to ${EXTRACT_DIR}."
 fi
-mkdir -p "${EXTRACT_DIR}/repo-root" "${EXTRACT_DIR}/app-data-root"
-if [[ -f "${EXTRACT_DIR}/gitea-repo.zip" ]]; then
-    unzip -q "${EXTRACT_DIR}/gitea-repo.zip" -d "${EXTRACT_DIR}/repo-root" \
-        || die "Failed to extract gitea-repo.zip."
+# This dump format stores repos/ and data/ as plain directory trees
+# directly in the archive (not nested zips inside it, as an earlier
+# version of this script assumed) - the outer unzip above already fully
+# extracted them, so just rename them to the internal names the rest of
+# this script uses. See README.md's "Restore" section.
+if [[ -d "${EXTRACT_DIR}/repos" ]]; then
+    mv "${EXTRACT_DIR}/repos" "${EXTRACT_DIR}/repo-root"
+else
+    mkdir -p "${EXTRACT_DIR}/repo-root"
 fi
-if ! unzip -q "${EXTRACT_DIR}/gitea-data.zip" -d "${EXTRACT_DIR}/app-data-root"; then
-    die "Failed to extract gitea-data.zip."
-fi
+[[ -d "${EXTRACT_DIR}/data" ]] || die "Archive ${ARCHIVE_NAME} does not contain the expected data/ directory."
+mv "${EXTRACT_DIR}/data" "${EXTRACT_DIR}/app-data-root"
 log INFO "Archive extracted to ${EXTRACT_DIR}."
 
 # ---------------------------------------------------------------------------
