@@ -2,9 +2,19 @@
 #
 # gitea-restore.sh
 # 2026-08-11
-# Version: v3.0.4
+# Version: v3.0.5
 #
 # CHANGELOG:
+#   v3.0.5 - --test-restore's teardown_test() EXIT trap now dumps the
+#            failed container's own log (last 50 lines) before removing
+#            it. Previously, a health-check failure told you to run
+#            "docker logs <container>" for diagnosis, but the same EXIT
+#            trap that printed that advice had already deleted the
+#            container by the time you could act on it - the one piece
+#            of information needed to actually diagnose the failure was
+#            destroyed before it could be read. Only fires on a failed
+#            run (checks the script's exit status); a successful
+#            test-restore is unaffected.
 #   v3.0.4 - Fixed archive integrity check and extraction to match what
 #            "gitea dump" actually produces: a real, live archive from
 #            a real deployment contains repos/ and data/ as plain
@@ -523,6 +533,15 @@ if [[ "$MODE" == "test-restore" ]]; then
     TEST_VOLUME="${TEST_NAME}-data"
 
     teardown_test() {
+        local exit_code=$?
+        # On failure, the container's own log is the most useful diagnostic
+        # there is - and it's about to be deleted below, so capture it here
+        # or it's gone. $? above is the script's exit status at the moment
+        # this EXIT trap fired, not this function's own (unset) status yet.
+        if (( exit_code != 0 )); then
+            log WARN "Test-restore failed - ${TEST_NAME}'s container log (last 50 lines) before teardown:"
+            timeout 15 docker logs --tail 50 "$TEST_NAME" 2>&1 | sed 's/^/  /' || true
+        fi
         log INFO "Tearing down test-restore container and volume..."
         timeout 15 docker rm -f "$TEST_NAME" >/dev/null 2>&1 || true
         timeout 15 docker volume rm "$TEST_VOLUME" >/dev/null 2>&1 || true
