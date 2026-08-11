@@ -1,4 +1,4 @@
-README.md v4.2.0 (Last Rev: 2026-08-11)
+README.md v4.2.1 (Last Rev: 2026-08-11)
 
 # Gitea Backup and Restore
 
@@ -552,6 +552,21 @@ still authenticate - none of that is safely automatable without touching
 things this project doesn't manage.
 
 ## Troubleshooting
+
+**`gitea-backup.sh` fails with "mkdir: can't create directory
+'.../gitea-dump-tmp': Permission denied" (fails at the "Running gitea
+dump inside container" step)** - `GITEA_CONTAINER_TMP` points at a path
+the `git` user inside the container can't write to. On the official
+`gitea/gitea` image, `/data` itself is commonly root-owned `755` (root
+can write, nobody else can), while `/data/gitea` (Gitea's own app data
+directory, alongside `GITEA_APP_INI`) is `git`-owned and always
+writable - which is why the shipped default is
+`/data/gitea/gitea-dump-tmp`, not directly under `/data`. If you changed
+this or your image's layout differs, confirm the real ownership first
+rather than guessing: `docker exec <container> ls -la /data` (and
+`docker exec <container> id git` to confirm the UID it's compared
+against), then point `GITEA_CONTAINER_TMP` at anywhere writable by that
+UID.
 
 **Script dies immediately with "Config file not found:
 /opt/gitea-backup/gitea-backup.conf" (or `/etc/gitea-backup/...`)** - the
