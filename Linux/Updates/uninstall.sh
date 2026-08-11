@@ -1,21 +1,34 @@
 #!/usr/bin/env bash
 #
 # uninstall.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-08-10
+# Version: v1.0.1
 #
 # PURPOSE:
 # Removes the linux-updates cron job, deployed scripts, and config.
 # Package manager prerequisites (cron/msmtp) are left in place since
 # other things on the host may depend on them.
+#
+# CHANGELOG:
+#   v1.0.1 - Switched to set -Eeuo pipefail with a fail-loud ERR trap - a
+#            failed removal step (e.g. a busy file under $INSTALL_DIR)
+#            previously went undetected and the script still printed
+#            "Uninstall complete".
 
-set -uo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/linux-updates"
 CONFIG_DIR="/etc/linux-updates"
 CRON_FILE="/etc/cron.d/linux-updates"
 LOG_DIR="/var/log/linux-updates"
+
+fail_trap() {
+    local lineno="$1"
+    echo "ERROR: ${0##*/} failed at line ${lineno}." >&2
+    exit 1
+}
+trap 'fail_trap "$LINENO"' ERR
 
 # shellcheck source=lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"

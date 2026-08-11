@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # install.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-08-10
+# Version: v1.0.1
 #
 # PURPOSE:
 # Interactive installer for linux-updates. Detects the host distro
@@ -10,8 +10,15 @@
 # picking an update schedule and configuring an SMTP relay for alerts,
 # then deploys itself as a cron job. Re-run at any time to change the
 # schedule, update mode, or SMTP settings.
+#
+# CHANGELOG:
+#   v1.0.1 - Switched to set -Eeuo pipefail with a fail-loud ERR trap (a
+#            failed apt-get/dnf prerequisite install previously went
+#            undetected - the script would proceed to write the cron job
+#            and print "Installation complete" regardless), and added a
+#            post-install check that the msmtp command actually resolves.
 
-set -uo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/linux-updates"
@@ -20,6 +27,13 @@ CONFIG_FILE="$CONFIG_DIR/config.conf"
 MSMTP_CONFIG="$CONFIG_DIR/msmtprc"
 CRON_FILE="/etc/cron.d/linux-updates"
 LOG_DIR="/var/log/linux-updates"
+
+fail_trap() {
+    local lineno="$1"
+    echo "ERROR: ${0##*/} failed at line ${lineno}. No further changes were made past this point." >&2
+    exit 1
+}
+trap 'fail_trap "$LINENO"' ERR
 
 # shellcheck source=lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"
@@ -60,6 +74,12 @@ install_prerequisites() {
     esac
 }
 install_prerequisites
+
+# Never trust the package manager's exit code alone - confirm the command
+# actually resolves before relying on it below.
+if ! command -v msmtp >/dev/null 2>&1; then
+    die "msmtp installed but the 'msmtp' command still cannot be found. Check the package manager output above."
+fi
 
 mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/lib" "$CONFIG_DIR" "$LOG_DIR"
 
