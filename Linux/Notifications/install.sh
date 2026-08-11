@@ -2,7 +2,7 @@
 #
 # install.sh
 # 2026-08-10
-# Version: v1.0.1
+# Version: v1.0.2
 #
 # PURPOSE:
 # Interactive installer for linux-notifications: installs and configures
@@ -12,6 +12,15 @@
 # settings or default recipient.
 #
 # CHANGELOG:
+#   v1.0.2 - Preseed the msmtp/apparmor debconf question and pass
+#            DEBIAN_FRONTEND=noninteractive on Debian-family hosts. Without
+#            this, `apt-get install msmtp` drops into an interactive
+#            whiptail "Enable AppArmor support?" dialog whenever a TTY is
+#            attached, hanging the installer until someone answers it (and
+#            on some consoles/serial links the dialog cannot be answered
+#            at all because arrow-key escape sequences aren't interpreted
+#            as navigation). AppArmor is now enabled by default; override
+#            by exporting MSMTP_APPARMOR=false before running this script.
 #   v1.0.1 - Added -E (errtrace) so the ERR trap below actually fires when
 #            a command fails inside install_prerequisites() - without it,
 #            bash does not propagate ERR traps into function bodies, so a
@@ -72,7 +81,13 @@ install_prerequisites() {
     case "$DISTRO_FAMILY" in
         debian)
             apt-get update -y
-            apt-get install -y msmtp
+            # Debian/Ubuntu's msmtp package asks an interactive "Enable
+            # AppArmor support?" debconf question on first install. Preseed
+            # it so apt-get never blocks on a whiptail dialog (which, on
+            # some consoles, cannot even be answered - arrow keys land as
+            # literal text instead of moving focus).
+            echo "msmtp msmtp/apparmor boolean ${MSMTP_APPARMOR:-true}" | debconf-set-selections
+            DEBIAN_FRONTEND=noninteractive apt-get install -y msmtp
             ;;
         fedora)
             dnf install -y msmtp
