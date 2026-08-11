@@ -41,7 +41,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "Downloading Server-Setup (from MVTS-Corp/Scripts)..."
-curl -fsSL "$REPO_TARBALL_URL" | tar -xz -C "$TMP_DIR" --strip-components=1
+timeout 120 curl --connect-timeout 10 --max-time 90 -fsSL "$REPO_TARBALL_URL" | tar -xz -C "$TMP_DIR" --strip-components=1
 
 INSTALL_DIR_SRC="$TMP_DIR/$INSTALL_SUBPATH"
 if [[ ! -f "$INSTALL_DIR_SRC/setup-server.sh" ]]; then
@@ -51,4 +51,6 @@ if [[ ! -f "$INSTALL_DIR_SRC/setup-server.sh" ]]; then
 fi
 
 chmod +x "$INSTALL_DIR_SRC/setup-server.sh"
-exec "$INSTALL_DIR_SRC/setup-server.sh" "$@" < /dev/tty
+# Not exec'd: exec replaces this process image, which would skip the EXIT
+# trap above and leak $TMP_DIR on every successful run.
+"$INSTALL_DIR_SRC/setup-server.sh" "$@" < /dev/tty

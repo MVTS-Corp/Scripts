@@ -20,7 +20,7 @@
 # CONFIG:
 #   No config file - everything is a flag or an interactive prompt.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GROUP_MGMT_LOCAL="${SCRIPT_DIR}/../Group-MGMT/create-usr_admin-group.sh"
@@ -85,6 +85,9 @@ fail_trap() {
     log_error "${0##*/} failed at line ${lineno}. No further changes were made past this point."
     exit 1
 }
+# -E (errtrace, set above) is required for this trap to fire when the
+# failing command is inside a function - without it bash silently skips
+# the ERR trap for function-internal failures.
 trap 'fail_trap "$LINENO"' ERR
 
 require_root
@@ -170,8 +173,8 @@ set_timezone() {
 # ---------------------------------------------------------------------------
 open_cockpit_firewall_port() {
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        firewall-cmd --add-service=cockpit --permanent >/dev/null
-        firewall-cmd --reload >/dev/null
+        timeout 30 firewall-cmd --add-service=cockpit --permanent >/dev/null
+        timeout 30 firewall-cmd --reload >/dev/null
         log_info "  firewalld: opened the cockpit service (TCP 9090)."
     elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
         ufw allow 9090/tcp >/dev/null
@@ -199,7 +202,7 @@ install_cockpit() {
             timeout 300 "$PKG_MANAGER" install -y cockpit
             ;;
     esac
-    systemctl enable --now cockpit.socket
+    timeout 60 systemctl enable --now cockpit.socket
     systemctl is-active --quiet cockpit.socket || die "cockpit.socket did not become active after enabling it."
     log_info "Cockpit installed and listening (cockpit.socket active)."
     open_cockpit_firewall_port
@@ -236,6 +239,8 @@ configure_netplan_renderer() {
                 { print }
                 /^network:[[:space:]]*$/ && !done { print "  renderer: NetworkManager"; done=1 }
             ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+            grep -Eq '^[[:space:]]*renderer:[[:space:]]*NetworkManager[[:space:]]*$' "$f" \
+                || die "Failed to insert 'renderer: NetworkManager' into ${f} - its 'network:' line was not in the expected format (expected a bare 'network:' key with no trailing content on that line). Edit it manually (a backup was saved alongside it)."
             log_info "  ${f}: added renderer: NetworkManager (backup saved alongside it)."
         fi
     done
@@ -253,7 +258,7 @@ configure_unattended_updates() {
         debian)
             timeout 300 apt-get install -y unattended-upgrades apt-listchanges
             echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true" | debconf-set-selections
-            dpkg-reconfigure -f noninteractive unattended-upgrades
+            timeout 300 dpkg-reconfigure -f noninteractive unattended-upgrades
             log_info "unattended-upgrades installed and enabled."
             ;;
         fedora|rhel)
@@ -271,7 +276,7 @@ configure_unattended_updates() {
                 fi
                 log_info "  dnf-automatic: set apply_updates = yes (backup saved)."
             fi
-            systemctl enable --now dnf-automatic.timer
+            timeout 60 systemctl enable --now dnf-automatic.timer
             systemctl is-active --quiet dnf-automatic.timer || die "dnf-automatic.timer did not become active after enabling it."
             log_info "dnf-automatic installed and enabled."
             ;;
@@ -286,7 +291,7 @@ setup_usr_admin_group() {
     log_info "== usr_admin group and /opt permissions =="
     if [[ -f "$GROUP_MGMT_LOCAL" ]]; then
         log_info "Using local Group-MGMT/create-usr_admin-group.sh..."
-        bash "$GROUP_MGMT_LOCAL" --users "root,${ADMIN_USER}" --yes
+        timeout 300 bash "$GROUP_MGMT_LOCAL" --users "root,${ADMIN_USER}" --yes
     else
         log_info "Local Group-MGMT script not found (standalone run); fetching from ${GROUP_MGMT_URL}..."
         local tmp
@@ -294,7 +299,7 @@ setup_usr_admin_group() {
         # shellcheck disable=SC2064
         trap "rm -f '${tmp}'" RETURN
         timeout 30 curl -fsSL "$GROUP_MGMT_URL" -o "$tmp" || die "Failed to fetch create-usr_admin-group.sh from ${GROUP_MGMT_URL}."
-        bash "$tmp" --users "root,${ADMIN_USER}" --yes
+        timeout 300 bash "$tmp" --users "root,${ADMIN_USER}" --yes
     fi
 
     log_info "Granting usr_admin read/write/execute on /opt (with default ACL for future files)..."
