@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-08-10
+# Version: v1.0.1
+#
+# CHANGELOG:
+#   v1.0.1 - Added -E (errtrace) so the ERR trap fires on function-
+#            internal failures too, timeout-wrapped the remaining
+#            unbounded external calls (dpkg-reconfigure, systemctl
+#            enable --now, firewall-cmd, the Group-MGMT delegate
+#            invocation), and fixed a false-success bug where the
+#            netplan renderer's awk fallback could report success
+#            without actually inserting the renderer line.
 #
 # PURPOSE:
 # Baseline provisioning for a freshly installed Linux server: base
