@@ -1,4 +1,4 @@
-README.md v4.0.0 (Last Rev: 2026-08-09)
+README.md v4.1.0 (Last Rev: 2026-08-11)
 
 # Gitea Backup and Restore
 
@@ -98,25 +98,32 @@ avoided.
 value both scripts use - nothing else is hardcoded. Every path below
 (SSH key or password file, known_hosts, staging directories, log file)
 can point anywhere you like; the values in the shipped template and in
-the Quick Start walkthrough below are just the suggested default layout
-(`/opt/gitea-backup` for the scripts and library, `/etc/gitea-backup` for
-config/secrets, `/var/backups` for staging, `/var/log` for logs). The
+the Quick Start walkthrough below are just the suggested default layout:
+everything for this tool - scripts, `lib/`, config, SSH key, known_hosts,
+rsync-daemon password file - lives together under `/opt/gitea-backup`,
+with only staging (`/var/backups`) and logs (`/var/log`) outside it. The
 only rule is consistency: wherever you actually put a file, set the
 matching variable to that exact path.
 
 The config file's own location is equally flexible. Both scripts default
-to reading `/etc/gitea-backup/gitea-backup.conf`, but this is overridable
+to reading `/opt/gitea-backup/gitea-backup.conf`, but this is overridable
 with the `GITEA_BACKUP_CONF` environment variable:
 
 ```bash
-GITEA_BACKUP_CONF=/opt/gitea-backup/gitea-backup.conf /opt/gitea-backup/gitea-backup.sh --check
+GITEA_BACKUP_CONF=/etc/gitea-backup/gitea-backup.conf /opt/gitea-backup/gitea-backup.sh --check
 ```
 
-So a fully self-contained deployment under one directory - e.g.
-everything under `/opt/gitea-backup`, config included - works exactly as
-well as the split layout the Quick Start below uses as its example. Just
-set `GITEA_BACKUP_CONF` (as a prefix on manual runs, or exported in the
-crontab line) to wherever you put the file.
+If you'd rather follow the traditional Linux convention of config/secrets
+under `/etc` and code under `/opt` (what this repo's other tools -
+Notifications, Updates - do), that works exactly as well: put
+`gitea-backup.conf`, the SSH key, and known_hosts under `/etc/gitea-backup`
+instead, point `NAS_SSH_KEY`/`NAS_KNOWN_HOSTS`/`RSYNC_DAEMON_PASSWORD_FILE`
+at that path, and set `GITEA_BACKUP_CONF` (as a prefix on manual runs, or
+exported in the crontab line) accordingly. Whichever layout you pick,
+**pick one and use it consistently** - pointing some files at `/opt` and
+others at `/etc` for the same deployment is what actually causes
+`Config file not found` errors, since each script only ever looks in the
+one place `GITEA_BACKUP_CONF` (or its default) tells it to.
 
 ### Container Identity
 
@@ -203,11 +210,12 @@ crontab line) to wherever you put the file.
 
 ## Quick Start
 
-The steps below deploy to the suggested default layout (`/opt/gitea-backup`
-for the scripts and library, `/etc/gitea-backup` for config/secrets,
-`/var/...` for staging and logs). See "Configuration Reference" above if
-you'd rather use a different layout - the same steps apply, just with your
-own paths and `GITEA_BACKUP_CONF` set accordingly.
+The steps below deploy to the suggested default layout: everything under
+one directory, `/opt/gitea-backup` (scripts, library, config, SSH key,
+known_hosts), with `/var/...` for staging and logs. See "Configuration
+Reference" above if you'd rather split config/secrets into `/etc` instead
+- the same steps apply, just with your own paths and `GITEA_BACKUP_CONF`
+set accordingly.
 
 ### 0. Get the Files
 
@@ -305,10 +313,10 @@ to the module name it's scoped to. Then store its password in its own
 file:
 
 ```bash
-sudo mkdir -p /etc/gitea-backup
-sudo tee /etc/gitea-backup/rsync_daemon_password > /dev/null
+sudo mkdir -p /opt/gitea-backup
+sudo tee /opt/gitea-backup/rsync_daemon_password > /dev/null
 # (paste the password, then press Ctrl-D)
-sudo chmod 600 /etc/gitea-backup/rsync_daemon_password
+sudo chmod 600 /opt/gitea-backup/rsync_daemon_password
 ```
 
 Set `RSYNC_DAEMON_PASSWORD_FILE` in the config to that path. Skip
@@ -320,10 +328,10 @@ since this method uses no SSH at all.
 On the Docker host, as the user that will run cron:
 
 ```bash
-sudo mkdir -p /etc/gitea-backup
-sudo ssh-keygen -t ed25519 -f /etc/gitea-backup/id_ed25519_gitea-backup -N "" -C "gitea-backup@$(hostname)"
-sudo chmod 600 /etc/gitea-backup/id_ed25519_gitea-backup
-sudo chmod 644 /etc/gitea-backup/id_ed25519_gitea-backup.pub
+sudo mkdir -p /opt/gitea-backup
+sudo ssh-keygen -t ed25519 -f /opt/gitea-backup/id_ed25519_gitea-backup -N "" -C "gitea-backup@$(hostname)"
+sudo chmod 600 /opt/gitea-backup/id_ed25519_gitea-backup
+sudo chmod 644 /opt/gitea-backup/id_ed25519_gitea-backup.pub
 ```
 
 Install the public key on the NAS for the `gitea-backup` account (DSM:
@@ -365,7 +373,7 @@ Using a dedicated known_hosts file (rather than the system-wide one) keeps
 this job's trust in the NAS's host key independent and easy to audit:
 
 ```bash
-sudo ssh-keyscan -p 22 <nas-host> | sudo tee /etc/gitea-backup/known_hosts
+sudo ssh-keyscan -p 22 <nas-host> | sudo tee /opt/gitea-backup/known_hosts
 ```
 
 Verify the fingerprint printed matches the NAS's actual key (check the NAS
@@ -374,21 +382,25 @@ verify anything, it just fetches whatever key is offered.
 
 ### 5. Deploy the Config and Scripts
 
+Everything goes in one directory - `/opt/gitea-backup` - alongside the
+SSH key and known_hosts file from steps 3 and 4:
+
 ```bash
 sudo mkdir -p /opt/gitea-backup
-sudo cp -r gitea-backup.sh gitea-restore.sh lib /opt/gitea-backup/
+sudo cp -r gitea-backup.sh gitea-restore.sh lib gitea-backup.conf /opt/gitea-backup/
 sudo chmod +x /opt/gitea-backup/gitea-backup.sh /opt/gitea-backup/gitea-restore.sh
-
-sudo mkdir -p /etc/gitea-backup
-sudo cp gitea-backup.conf /etc/gitea-backup/gitea-backup.conf
-sudo chmod 600 /etc/gitea-backup/gitea-backup.conf
-sudo nano /etc/gitea-backup/gitea-backup.conf   # fill in every value
+sudo chmod 600 /opt/gitea-backup/gitea-backup.conf
+sudo nano /opt/gitea-backup/gitea-backup.conf   # fill in every value
 ```
 
 `lib/` must be copied along with the two scripts (`cp -r ... lib
 /opt/gitea-backup/` above does this) - both scripts look for it relative
 to their own location, so copying only the two `.sh` files without `lib/`
 leaves them unable to find their transport backend.
+
+Both scripts default to reading `gitea-backup.conf` from this same
+directory, so no `GITEA_BACKUP_CONF` override is needed with this layout
+- see "Configuration Reference" above if you're using a different one.
 
 ### 6. Test Before Scheduling
 
@@ -494,6 +506,19 @@ still authenticate - none of that is safely automatable without touching
 things this project doesn't manage.
 
 ## Troubleshooting
+
+**Script dies immediately with "Config file not found:
+/opt/gitea-backup/gitea-backup.conf" (or `/etc/gitea-backup/...`)** - the
+config file isn't at the path the script is actually looking in. This
+usually means the deployment is split across both `/opt/gitea-backup` and
+`/etc/gitea-backup` - e.g. the scripts and conf were all copied to `/opt`
+(this README's default, Quick Start step 5), but `GITEA_BACKUP_CONF` is
+still set to (or a stale copy of these instructions pointed at) the old
+`/etc` path, or vice versa. Pick one directory for everything and use it
+consistently - see "Configuration Reference" above - then either move the
+conf file to match the script's default, or set `GITEA_BACKUP_CONF`
+explicitly to wherever it actually is:
+`GITEA_BACKUP_CONF=/opt/gitea-backup/gitea-backup.conf sudo -E /opt/gitea-backup/gitea-backup.sh --check`.
 
 **`--check` fails with "Cannot reach ... or path does not exist / is not
 writable"** - either the account/key isn't authorized on the NAS yet, or

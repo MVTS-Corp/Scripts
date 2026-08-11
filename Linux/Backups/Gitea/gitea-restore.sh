@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 #
 # gitea-restore.sh
-# 2026-08-10
-# Version: v3.0.1
+# 2026-08-11
+# Version: v3.0.2
 #
 # CHANGELOG:
+#   v3.0.2 - Default config path changed from /etc/gitea-backup to
+#            /opt/gitea-backup, matching gitea-backup.sh v4.0.2 - see
+#            that script's changelog and README.md for the reasoning.
+#            BREAKING for an existing deployment that relied on the old
+#            /etc/gitea-backup default without ever setting
+#            GITEA_BACKUP_CONF.
 #   v3.0.1 - Bounded every "docker inspect/stop/start/cp/run/rm/volume"
 #            call with a timeout (an unresponsive docker daemon could
 #            previously hang this script indefinitely, including inside
@@ -68,14 +74,14 @@
 #       synonym for --dry-run - this is the disruptive, production path.
 #
 # CONFIG:
-#   Reads /etc/gitea-backup/gitea-backup.conf by default (same file as
+#   Reads /opt/gitea-backup/gitea-backup.conf by default (same file as
 #   gitea-backup.sh - see that file's "Restore" section). Override with
 #   GITEA_BACKUP_CONF=/path/to/file.conf gitea-restore.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF_FILE="${GITEA_BACKUP_CONF:-/etc/gitea-backup/gitea-backup.conf}"
+CONF_FILE="${GITEA_BACKUP_CONF:-/opt/gitea-backup/gitea-backup.conf}"
 MODE=""
 ARCHIVE_NAME=""
 LOCAL_FILE=""

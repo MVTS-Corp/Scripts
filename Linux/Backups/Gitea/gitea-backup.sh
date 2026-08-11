@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 #
 # gitea-backup.sh
-# 2026-08-10
-# Version: v4.0.1
+# 2026-08-11
+# Version: v4.0.2
 #
 # CHANGELOG:
+#   v4.0.2 - Default config path changed from /etc/gitea-backup to
+#            /opt/gitea-backup, so a real deployment doesn't have to
+#            juggle two directories for one tool - everything (scripts,
+#            lib/, config, keys, known_hosts) now lives in one place by
+#            default. Still fully overridable with GITEA_BACKUP_CONF for
+#            anyone who prefers the traditional split (config/secrets
+#            under /etc, code under /opt). BREAKING for an existing
+#            deployment that relied on the old /etc/gitea-backup default
+#            without ever setting GITEA_BACKUP_CONF - see README.md.
 #   v4.0.1 - Bounded every "docker inspect/exec" call with a timeout (an
 #            unresponsive docker daemon could previously hang this script
 #            indefinitely, including inside the EXIT-trap cleanup handler).
@@ -34,13 +43,13 @@
 #                                    (includes a live NAS connectivity test)
 #
 # CONFIG:
-#   Reads /etc/gitea-backup/gitea-backup.conf by default. Override with
+#   Reads /opt/gitea-backup/gitea-backup.conf by default. Override with
 #   GITEA_BACKUP_CONF=/path/to/file.conf gitea-backup.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF_FILE="${GITEA_BACKUP_CONF:-/etc/gitea-backup/gitea-backup.conf}"
+CONF_FILE="${GITEA_BACKUP_CONF:-/opt/gitea-backup/gitea-backup.conf}"
 DRY_RUN=0
 CHECK_ONLY=0
 
