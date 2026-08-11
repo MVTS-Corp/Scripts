@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # bootstrap.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-08-10
+# Version: v1.0.1
 #
 # PURPOSE:
 # One-line remote installer for linux-notifications. Downloads a snapshot
@@ -11,6 +11,14 @@
 # command instead of a manual clone/cd/install sequence. install.sh is
 # still fully interactive; this script only fetches it and reattaches
 # the terminal so its prompts work.
+#
+# CHANGELOG:
+#   v1.0.1 - Bounded the download with a timeout (a stalled connection
+#            previously hung with no limit), and stopped exec'ing into
+#            install.sh so the EXIT trap below can still fire and clean
+#            up $TMP_DIR on a successful run (exec replaces the process
+#            image, which skips EXIT traps - every prior successful
+#            bootstrap leaked its downloaded repo snapshot under /tmp).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Notifications/bootstrap.sh | sudo bash
@@ -39,7 +47,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "Downloading linux-notifications (from MVTS-Corp/Scripts)..."
-curl -fsSL "$REPO_TARBALL_URL" | tar -xz -C "$TMP_DIR" --strip-components=1
+timeout 120 curl --connect-timeout 10 --max-time 90 -fsSL "$REPO_TARBALL_URL" | tar -xz -C "$TMP_DIR" --strip-components=1
 
 INSTALL_DIR_SRC="$TMP_DIR/$INSTALL_SUBPATH"
 if [[ ! -f "$INSTALL_DIR_SRC/install.sh" ]]; then
@@ -49,4 +57,6 @@ if [[ ! -f "$INSTALL_DIR_SRC/install.sh" ]]; then
 fi
 
 chmod +x "$INSTALL_DIR_SRC/install.sh"
-exec "$INSTALL_DIR_SRC/install.sh" < /dev/tty
+# Not exec'd: exec replaces this process image, which would skip the EXIT
+# trap above and leak $TMP_DIR on every successful run.
+"$INSTALL_DIR_SRC/install.sh" < /dev/tty

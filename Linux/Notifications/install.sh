@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # install.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-08-10
+# Version: v1.0.1
 #
 # PURPOSE:
 # Interactive installer for linux-notifications: installs and configures
@@ -10,8 +10,16 @@
 # deploys a `send-alert` command onto PATH that any other script or cron
 # job on the host can call. Re-run at any time to change the SMTP
 # settings or default recipient.
+#
+# CHANGELOG:
+#   v1.0.1 - Added -E (errtrace) so the ERR trap below actually fires when
+#            a command fails inside install_prerequisites() - without it,
+#            bash does not propagate ERR traps into function bodies, so a
+#            failed apt-get/dnf install there was silently missing its
+#            "failed at line N" message (set -e still aborted the script
+#            correctly either way).
 
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/linux-notifications"
