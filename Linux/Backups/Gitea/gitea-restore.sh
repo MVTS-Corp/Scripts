@@ -2,9 +2,24 @@
 #
 # gitea-restore.sh
 # 2026-08-11
-# Version: v3.0.6
+# Version: v3.0.7
 #
 # CHANGELOG:
+#   v3.0.7 - Fixed a regression from v3.0.6's own defensive app.ini
+#            restoration: confirmed against a real archive that when
+#            CustomPath and AppDataPath overlap, data/ already contains
+#            a complete, already-installed conf/app.ini (INSTALL_LOCK =
+#            true) at exactly the path GITEA_APP_INI expects - and the
+#            archive's separate standalone top-level app.ini is NOT
+#            necessarily the same file. v3.0.6 copied the standalone one
+#            in unconditionally, silently overwriting the good nested
+#            config with an incomplete one lacking INSTALL_LOCK, which
+#            sent every restored instance to Gitea's install wizard
+#            instead of starting normally - a real bug found via a live
+#            restore before it could reach the actual production
+#            --restore path. The standalone copy is now used only as a
+#            fallback when data/ doesn't already have one at that path;
+#            an existing nested config is never overwritten.
 #   v3.0.6 - Proactive review after live troubleshooting kept surfacing
 #            issues in this same code path, found two more before they
 #            could bite in production:
@@ -434,7 +449,7 @@ if ! grep -q "repos/" <<< "$archive_listing"; then
     log WARN "Archive does not contain a repos/ directory (expected for an instance with zero repositories; otherwise this is unexpected)."
 fi
 if ! grep -q "app.ini" <<< "$archive_listing"; then
-    log WARN "Archive does not contain a standalone app.ini. GITEA_APP_INI's config file will only be restored if it is already present inside data/ - if the restored instance won't start, check for a missing config file first."
+    log WARN "Archive does not contain a standalone app.ini. GITEA_APP_INI's config file will only be restored if data/ already contains one at that path - if the restored instance shows Gitea's install wizard instead of starting normally, check for a missing or incomplete config file first."
 fi
 log INFO "Archive verified: ${ARCHIVE_LOCAL_PATH} (${archive_size} bytes)."
 
@@ -467,19 +482,22 @@ fi
 [[ -d "${EXTRACT_DIR}/data" ]] || die "Archive ${ARCHIVE_NAME} does not contain the expected data/ directory."
 mv "${EXTRACT_DIR}/data" "${EXTRACT_DIR}/app-data-root"
 
-# gitea dump also writes a standalone top-level app.ini - the config
-# Gitea was actually running with at backup time - separate from data/.
-# Whether it's also nested inside data/ (at GITEA_APP_INI's path,
-# relative to APP_DATA_ROOT) appears to depend on whether CustomPath and
-# AppDataPath happen to be configured the same or differently. Always
-# place it explicitly at the path GITEA_APP_INI expects within the
-# restored data, so a restore can't come up with a missing or stale
-# config regardless of that overlap - harmless if data/ already had it
-# (same content, just overwritten with itself).
+# gitea dump also writes a standalone top-level app.ini, separate from
+# data/. Confirmed against a real archive: when CustomPath and
+# AppDataPath are configured the same (as here), data/ already contains
+# its own complete, already-installed conf/app.ini (with
+# INSTALL_LOCK = true) at the exact path GITEA_APP_INI expects - and the
+# standalone top-level copy is NOT necessarily the same file (do not
+# assume it is safe to overwrite with). Use it only as a fallback for a
+# deployment where data/ genuinely lacks one; never clobber an existing
+# nested config with it.
 if [[ -f "${EXTRACT_DIR}/app.ini" ]]; then
     app_ini_rel="${GITEA_APP_INI#"${APP_DATA_ROOT}"/}"
-    mkdir -p "${EXTRACT_DIR}/app-data-root/$(dirname "$app_ini_rel")"
-    cp "${EXTRACT_DIR}/app.ini" "${EXTRACT_DIR}/app-data-root/${app_ini_rel}"
+    if [[ ! -f "${EXTRACT_DIR}/app-data-root/${app_ini_rel}" ]]; then
+        mkdir -p "${EXTRACT_DIR}/app-data-root/$(dirname "$app_ini_rel")"
+        cp "${EXTRACT_DIR}/app.ini" "${EXTRACT_DIR}/app-data-root/${app_ini_rel}"
+        log INFO "Restored app.ini from the archive's standalone copy (data/ did not already contain one at ${app_ini_rel})."
+    fi
 fi
 log INFO "Archive extracted to ${EXTRACT_DIR}."
 
