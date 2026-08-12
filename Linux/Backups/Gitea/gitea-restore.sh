@@ -2,9 +2,35 @@
 #
 # gitea-restore.sh
 # 2026-08-11
-# Version: v3.0.5
+# Version: v3.0.6
 #
 # CHANGELOG:
+#   v3.0.6 - Proactive review after live troubleshooting kept surfacing
+#            issues in this same code path, found two more before they
+#            could bite in production:
+#            - "docker cp" preserves the copying process's own uid/gid
+#              (root, since this script runs via sudo) on files it writes
+#              into the container, not whatever user Gitea actually runs
+#              as. Every restored file was very likely landing owned by
+#              root instead of the confirmed-required git user, which
+#              could prevent Gitea from even reading its own restored
+#              data - a real bug in the production --restore path, not
+#              just --test-restore. restore_pipeline() now chowns the
+#              restored paths back to GITEA_CONTAINER_USER's uid/gid
+#              (looked up live inside the target, not hardcoded) right
+#              after copying, before starting the container.
+#            - That fix needed GITEA_CONTAINER_USER, which this script
+#              never previously used (only gitea-backup.sh did) and so
+#              never gave a fallback default - would have hard-failed
+#              with "unbound variable" under set -u on any conf file
+#              that didn't happen to define it explicitly. Added the same
+#              "${GITEA_CONTAINER_USER:-git}" fallback gitea-backup.sh
+#              already uses.
+#            - Also defensively restore the archive's standalone app.ini
+#              to its expected path inside the restored data (in addition
+#              to whatever data/ already contains), since it's not yet
+#              confirmed whether every Gitea configuration includes it in
+#              data/ too - harmless no-op if it's already there.
 #   v3.0.5 - --test-restore's teardown_test() EXIT trap now dumps the
 #            failed container's own log (last 50 lines) before removing
 #            it. Previously, a health-check failure told you to run
@@ -235,6 +261,11 @@ done
 
 RESTORE_STAGING_DIR="${RESTORE_STAGING_DIR:-${STAGING_DIR}/restore}"
 RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-21600}"
+# Not previously used by this script (only gitea-backup.sh needed it to
+# run "gitea dump" as the right user) - now also needed to fix ownership
+# of restored files, so it needs the same fallback default gitea-backup.sh
+# uses, in case an older or hand-trimmed conf file predates this variable.
+GITEA_CONTAINER_USER="${GITEA_CONTAINER_USER:-git}"
 RESTORE_TEST_CONTAINER_PREFIX="${RESTORE_TEST_CONTAINER_PREFIX:-gitea-test-restore}"
 RESTORE_TEST_PORT="${RESTORE_TEST_PORT:-3080}"
 RESTORE_TEST_DATA_MOUNT="${RESTORE_TEST_DATA_MOUNT:-/data}"
@@ -402,6 +433,9 @@ done
 if ! grep -q "repos/" <<< "$archive_listing"; then
     log WARN "Archive does not contain a repos/ directory (expected for an instance with zero repositories; otherwise this is unexpected)."
 fi
+if ! grep -q "app.ini" <<< "$archive_listing"; then
+    log WARN "Archive does not contain a standalone app.ini. GITEA_APP_INI's config file will only be restored if it is already present inside data/ - if the restored instance won't start, check for a missing config file first."
+fi
 log INFO "Archive verified: ${ARCHIVE_LOCAL_PATH} (${archive_size} bytes)."
 
 if [[ "$MODE" == "dry-run" ]]; then
@@ -432,6 +466,21 @@ else
 fi
 [[ -d "${EXTRACT_DIR}/data" ]] || die "Archive ${ARCHIVE_NAME} does not contain the expected data/ directory."
 mv "${EXTRACT_DIR}/data" "${EXTRACT_DIR}/app-data-root"
+
+# gitea dump also writes a standalone top-level app.ini - the config
+# Gitea was actually running with at backup time - separate from data/.
+# Whether it's also nested inside data/ (at GITEA_APP_INI's path,
+# relative to APP_DATA_ROOT) appears to depend on whether CustomPath and
+# AppDataPath happen to be configured the same or differently. Always
+# place it explicitly at the path GITEA_APP_INI expects within the
+# restored data, so a restore can't come up with a missing or stale
+# config regardless of that overlap - harmless if data/ already had it
+# (same content, just overwritten with itself).
+if [[ -f "${EXTRACT_DIR}/app.ini" ]]; then
+    app_ini_rel="${GITEA_APP_INI#"${APP_DATA_ROOT}"/}"
+    mkdir -p "${EXTRACT_DIR}/app-data-root/$(dirname "$app_ini_rel")"
+    cp "${EXTRACT_DIR}/app.ini" "${EXTRACT_DIR}/app-data-root/${app_ini_rel}"
+fi
 log INFO "Archive extracted to ${EXTRACT_DIR}."
 
 # ---------------------------------------------------------------------------
@@ -501,6 +550,24 @@ restore_pipeline() {
     timeout "$RESTORE_TIMEOUT" docker cp "${EXTRACT_DIR}/app-data-root/." "${target}:${APP_DATA_ROOT}/" \
         || die "Failed to copy restored app data into ${target}. It is stopped with the pre-restore data preserved as *.${suffix} - safe to investigate."
     log INFO "Restored repository and app data copied into ${target}."
+
+    # "docker cp" preserves the copying process's own uid/gid on the files
+    # it writes (root, since this script runs via sudo) - not whatever
+    # user Gitea actually runs as inside the container. If that user can't
+    # read/write its own just-restored data, it can fail to start
+    # entirely, which would otherwise look like an unrelated crash. Fix
+    # ownership back to match before starting the container.
+    FAILED_CONTEXT="Fixing ownership of restored data in ${target}"
+    local restore_uid restore_gid
+    restore_uid="$(timeout 15 docker exec "$target" id -u "$GITEA_CONTAINER_USER" 2>/dev/null)"
+    restore_gid="$(timeout 15 docker exec "$target" id -g "$GITEA_CONTAINER_USER" 2>/dev/null)"
+    if [[ -n "$restore_uid" && -n "$restore_gid" ]]; then
+        timeout "$RESTORE_TIMEOUT" docker exec -u root "$target" chown -R "${restore_uid}:${restore_gid}" "$GITEA_REPO_ROOT" "$APP_DATA_ROOT" \
+            || die "Failed to fix ownership of restored data in ${target}. Container is stopped with restored files in place, owned by root instead of ${GITEA_CONTAINER_USER} - safe to investigate, or fix manually: docker exec -u root ${target} chown -R ${GITEA_CONTAINER_USER}:${GITEA_CONTAINER_USER} ${GITEA_REPO_ROOT} ${APP_DATA_ROOT}"
+        log INFO "Restored data ownership set to ${GITEA_CONTAINER_USER} (uid=${restore_uid}, gid=${restore_gid}) in ${target}."
+    else
+        log WARN "Could not resolve uid/gid for ${GITEA_CONTAINER_USER} inside ${target}; skipping ownership fix. Restored files are likely owned by root instead of ${GITEA_CONTAINER_USER}, which can prevent Gitea from starting - fix manually if needed: docker exec -u root ${target} chown -R ${GITEA_CONTAINER_USER}:${GITEA_CONTAINER_USER} ${GITEA_REPO_ROOT} ${APP_DATA_ROOT}"
+    fi
 
     if [[ -n "$db_hook" ]]; then
         FAILED_CONTEXT="Restoring database via configured hook"
