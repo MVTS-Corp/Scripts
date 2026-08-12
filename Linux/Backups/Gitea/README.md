@@ -1,4 +1,4 @@
-README.md v4.2.1 (Last Rev: 2026-08-11)
+README.md v4.2.2 (Last Rev: 2026-08-12)
 
 # Gitea Backup and Restore
 
@@ -672,6 +672,23 @@ normally backed by an external DB it cannot reach from the isolated test
 network; the run still confirms the archive is intact and files placed
 correctly. Set `TEST_RESTORE_DB_CMD` to a non-production test database if
 you want test-restore to validate the full stack.
+
+**A `--test-restore` run logs a WARN that the container "exited because
+it could not reach its configured database" and still reports PASSED** -
+also informational, not a failure - this is a step further than the HTTP
+case above: Gitea itself exits (rather than degrading gracefully) when it
+can't reach its configured database at startup, and the isolated
+test-restore network deliberately cannot reach an external DB the
+restored config normally points at. This is recognized specifically (by
+matching the container's own DB-connection-failure log signature) and
+does not count against the test-restore, which still confirms
+everything it claims to: the archive is fetchable and intact, the
+restored config loads correctly (no install-wizard fallback, no missing
+files), and the files place correctly into a real container layout. Only
+actual DB reachability - which `--test-restore` never claims to prove
+without `TEST_RESTORE_DB_CMD` set - goes untested. A real `--restore` is
+given no such tolerance: it runs on the real network, so any crash there
+is treated as a genuine failure.
 
 **`--restore` completes but the site looks empty or serves stale data** -
 check the log for "No DB restore hook configured": if `DB_RESTORE_CMD` is

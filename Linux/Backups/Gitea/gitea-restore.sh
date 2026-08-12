@@ -2,9 +2,40 @@
 #
 # gitea-restore.sh
 # 2026-08-12
-# Version: v3.0.8
+# Version: v3.0.9
 #
 # CHANGELOG:
+#   v3.0.9 - Two fixes, both surfaced by a real --test-restore that
+#            finally got far enough to reach them:
+#            - send_mail_raw()'s "mail not installed" branch (added a
+#              few commits ago) returned 1, breaking the "a notification
+#              failure never fails the caller" contract every other path
+#              in this function already honors (the exhausted-retries
+#              branch correctly returns 0). Combined with the new -E,
+#              this made send_failure_notification's own bare call
+#              inside die()/fail_trap fail loudly on every error report
+#              when mail wasn't installed - a second, misleading
+#              "failed at line N" for what was really just a missing
+#              mail command. Also would have broken success-path
+#              notifications the same way. Fixed to return 0, matching
+#              every other path.
+#            - health_check() treated Gitea exiting because it can't
+#              reach its configured database as a hard failure, even
+#              though this script's own header already documents that
+#              exact scenario as "expected... treated as informational,
+#              not a failure" for --test-restore's deliberately isolated
+#              network. The code didn't match its own documented
+#              promise - confirmed for real: a live test-restore against
+#              a production archive showed Gitea correctly load the
+#              restored config, then correctly fail 10 connection
+#              attempts to the real (unreachable-by-design) DB host,
+#              then exit - exactly the documented tradeoff, just treated
+#              as a failure instead of the informational case it always
+#              claimed to be. health_check() now recognizes this
+#              specific failure signature (only for --test-restore - a
+#              real --restore has no such excuse and still fails hard
+#              on any crash) and reports a pass with a clear caveat
+#              instead.
 #   v3.0.8 - Fixed v3.0.6's ownership fix, which used "docker exec"
 #            directly on the target container to resolve its uid/gid and
 #            chown restored files - but target is deliberately still
@@ -255,7 +286,7 @@ send_mail_raw() {
     [[ -z "${NOTIFY_EMAIL:-}" ]] && return 0
     if ! command -v mail >/dev/null 2>&1; then
         log WARN "NOTIFY_EMAIL is set but 'mail' command is not installed; skipping email alert (not retrying - it cannot succeed without the command)."
-        return 1
+        return 0
     fi
     while (( attempt <= max_attempts )); do
         if echo "$body" | timeout 30 mail -s "$subject" -r "${MAIL_FROM:-gitea-backup@localhost}" "$NOTIFY_EMAIL"; then
@@ -551,6 +582,21 @@ health_check() {
         local state
         state="$(timeout 15 docker inspect -f '{{.State.Running}}' "$target" 2>/dev/null || echo false)"
         if [[ "$state" != "true" ]]; then
+            # For --test-restore only (http_port is only ever passed for
+            # that mode): Gitea itself exits outright if it can't reach
+            # its configured database at startup - it does not degrade
+            # gracefully. An isolated test-restore container deliberately
+            # cannot reach an external DB it is normally configured to
+            # use (own network, by design - see header), so this exact
+            # failure mode is expected, not a sign anything actually went
+            # wrong with the restore itself. A real --restore has no such
+            # excuse (it runs on the real network) and is not given this
+            # tolerance - any crash there is treated as a genuine failure.
+            if [[ -n "$http_port" ]] && timeout 15 docker logs --tail 100 "$target" 2>&1 \
+                | grep -qE "InitDBEngine.*(no such host|connection refused|dial tcp|i/o timeout)"; then
+                log WARN "${target} exited because it could not reach its configured database - expected for an isolated test-restore container that cannot reach an external DB it is normally configured to use (set TEST_RESTORE_DB_CMD if you want this validated too). Treating this as a pass: fetch, integrity, extraction, file placement, and config load all succeeded - only DB connectivity, which this isolated network deliberately cannot provide, was not proven."
+                return 0
+            fi
             die "${target} is not running after restore (crashed or exited). Check: docker logs ${target}"
         fi
     done

@@ -2,9 +2,16 @@
 #
 # gitea-backup.sh
 # 2026-08-12
-# Version: v4.0.4
+# Version: v4.0.5
 #
 # CHANGELOG:
+#   v4.0.5 - send_mail_raw()'s "mail not installed" branch returned 1,
+#            breaking the "a notification failure never fails the
+#            caller" contract every other path in this function already
+#            honors. Matches gitea-restore.sh v3.0.9 - see that
+#            changelog for how this combined with -E to produce a
+#            misleading second error on every failure report when mail
+#            wasn't installed. Fixed to return 0.
 #   v4.0.4 - Added -E (errtrace), matching gitea-restore.sh v3.0.8. This
 #            script does most of its work inside functions too; without
 #            -E a failure there is still caught by set -e, but silently
@@ -111,7 +118,7 @@ send_mail_raw() {
     [[ -z "${NOTIFY_EMAIL:-}" ]] && return 0
     if ! command -v mail >/dev/null 2>&1; then
         log WARN "NOTIFY_EMAIL is set but 'mail' command is not installed; skipping email alert (not retrying - it cannot succeed without the command)."
-        return 1
+        return 0
     fi
     while (( attempt <= max_attempts )); do
         if echo "$body" | timeout 30 mail -s "$subject" -r "${MAIL_FROM:-gitea-backup@localhost}" "$NOTIFY_EMAIL"; then
