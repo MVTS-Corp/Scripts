@@ -2,9 +2,19 @@
 #
 # gitea-restore.sh
 # 2026-08-12
-# Version: v3.0.9
+# Version: v3.0.10
 #
 # CHANGELOG:
+#   v3.0.10 - v3.0.9's DB-unreachable detection piped "docker logs"
+#             straight into grep. Under pipefail (set above), a
+#             non-zero exit from "docker logs" itself - which happened
+#             for real, confirmed against a live test-restore - makes
+#             the whole pipeline read as failed even when grep would
+#             have matched, silently turning a real match into a false
+#             negative and sending every run down the hard-failure path
+#             regardless. Captures the log into a variable first and
+#             greps that separately, so a non-zero exit from "docker
+#             logs" can no longer mask a genuine match.
 #   v3.0.9 - Two fixes, both surfaced by a real --test-restore that
 #            finally got far enough to reach them:
 #            - send_mail_raw()'s "mail not installed" branch (added a
@@ -592,10 +602,19 @@ health_check() {
             # wrong with the restore itself. A real --restore has no such
             # excuse (it runs on the real network) and is not given this
             # tolerance - any crash there is treated as a genuine failure.
-            if [[ -n "$http_port" ]] && timeout 15 docker logs --tail 100 "$target" 2>&1 \
-                | grep -qE "InitDBEngine.*(no such host|connection refused|dial tcp|i/o timeout)"; then
-                log WARN "${target} exited because it could not reach its configured database - expected for an isolated test-restore container that cannot reach an external DB it is normally configured to use (set TEST_RESTORE_DB_CMD if you want this validated too). Treating this as a pass: fetch, integrity, extraction, file placement, and config load all succeeded - only DB connectivity, which this isolated network deliberately cannot provide, was not proven."
-                return 0
+            if [[ -n "$http_port" ]]; then
+                # Captured separately, not piped straight into grep: under
+                # pipefail (set above), a non-zero exit from "docker logs"
+                # itself (e.g. against an already-exited container) would
+                # make the whole pipeline read as "failed" even if grep
+                # would have matched - silently masking a real match as
+                # no-match. Confirmed hitting exactly this in production.
+                local crash_log
+                crash_log="$(timeout 15 docker logs --tail 100 "$target" 2>&1)" || true
+                if grep -qE "InitDBEngine.*(no such host|connection refused|dial tcp|i/o timeout)" <<< "$crash_log"; then
+                    log WARN "${target} exited because it could not reach its configured database - expected for an isolated test-restore container that cannot reach an external DB it is normally configured to use (set TEST_RESTORE_DB_CMD if you want this validated too). Treating this as a pass: fetch, integrity, extraction, file placement, and config load all succeeded - only DB connectivity, which this isolated network deliberately cannot provide, was not proven."
+                    return 0
+                fi
             fi
             die "${target} is not running after restore (crashed or exited). Check: docker logs ${target}"
         fi
