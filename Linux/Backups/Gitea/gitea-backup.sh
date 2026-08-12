@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 #
 # gitea-backup.sh
-# 2026-08-11
-# Version: v4.0.3
+# 2026-08-12
+# Version: v4.0.4
 #
 # CHANGELOG:
+#   v4.0.4 - Added -E (errtrace), matching gitea-restore.sh v3.0.8. This
+#            script does most of its work inside functions too; without
+#            -E a failure there is still caught by set -e, but silently
+#            (no "failed at line N" message) - see gitea-restore.sh's
+#            changelog for how this exact gap hid a real bug for
+#            multiple rounds of live troubleshooting.
 #   v4.0.3 - send_mail_raw() now checks 'mail' is actually installed
 #            before attempting to use it, instead of blindly retrying 3
 #            times (up to 15s of backoff sleep, plus raw "timeout: failed
@@ -54,7 +60,7 @@
 #   Reads /opt/gitea-backup/gitea-backup.conf by default. Override with
 #   GITEA_BACKUP_CONF=/path/to/file.conf gitea-backup.sh
 
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="${GITEA_BACKUP_CONF:-/opt/gitea-backup/gitea-backup.conf}"
@@ -89,6 +95,11 @@ fail_trap() {
     send_failure_notification "Failed at line ${lineno}. ${FAILED_CONTEXT}"
     exit 1
 }
+# -E (errtrace, set above) is required for this trap to fire when the
+# failing command is inside a function - without it, set -e still
+# catches the failure, but silently: no "failed at line N" message. See
+# gitea-restore.sh's matching comment for how this gap actually bit in
+# production during live troubleshooting.
 trap 'fail_trap "$LINENO"' ERR
 
 # ---------------------------------------------------------------------------

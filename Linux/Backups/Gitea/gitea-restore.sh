@@ -1,10 +1,36 @@
 #!/usr/bin/env bash
 #
 # gitea-restore.sh
-# 2026-08-11
-# Version: v3.0.7
+# 2026-08-12
+# Version: v3.0.8
 #
 # CHANGELOG:
+#   v3.0.8 - Fixed v3.0.6's ownership fix, which used "docker exec"
+#            directly on the target container to resolve its uid/gid and
+#            chown restored files - but target is deliberately still
+#            stopped at that point in restore_pipeline() (the exact
+#            constraint this script's own comment on the "move aside"
+#            step above already documented and correctly avoided).
+#            "docker exec" requires a running container, so this failed
+#            every time, and - because this script had no -E/errtrace
+#            (see below) - failed silently: no error message, script
+#            just died via set -e, and teardown_test()'s EXIT trap made
+#            every test-restore since v3.0.6 look like an unrelated,
+#            unexplained failure. The captured "container log" shown in
+#            each of those failures was actually just the initial
+#            clean-volume boot from before the restore ever ran, not a
+#            verdict on the restored data at all - several rounds of
+#            live troubleshooting chased the wrong symptom because of
+#            this. Rewrote the ownership fix to use the same
+#            --volumes-from helper-container pattern the "move aside"
+#            step already uses, which works regardless of whether target
+#            itself is running.
+#          - Added -E (errtrace) to both this script and gitea-backup.sh.
+#            Without it, a failure inside any function (which is nearly
+#            everything both scripts actually do) is still caught by
+#            set -e, but silently - exactly the gap that let the bug
+#            above hide for multiple rounds instead of reporting "failed
+#            at line N" like it should have from the start.
 #   v3.0.7 - Fixed a regression from v3.0.6's own defensive app.ini
 #            restoration: confirmed against a real archive that when
 #            CustomPath and AppDataPath overlap, data/ already contains
@@ -145,7 +171,7 @@
 #   gitea-backup.sh - see that file's "Restore" section). Override with
 #   GITEA_BACKUP_CONF=/path/to/file.conf gitea-restore.sh
 
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="${GITEA_BACKUP_CONF:-/opt/gitea-backup/gitea-backup.conf}"
@@ -209,6 +235,15 @@ fail_trap() {
     send_failure_notification "Failed at line ${lineno}. ${FAILED_CONTEXT}"
     exit 1
 }
+# -E (errtrace, set above) is required for this trap to fire when the
+# failing command is inside a function (restore_pipeline, health_check,
+# etc., which is where almost everything in this script actually runs) -
+# without it, a failure there is still caught by set -e, but silently:
+# no "failed at line N" message, just whatever the EXIT trap's own
+# generic teardown happens to print. Found the hard way: a real bug in
+# restore_pipeline() died at exactly this gap, and the resulting
+# failure looked unrelated to its actual cause for several rounds of
+# live troubleshooting before the missing -E was noticed.
 trap 'fail_trap "$LINENO"' ERR
 
 # ---------------------------------------------------------------------------
@@ -575,16 +610,28 @@ restore_pipeline() {
     # read/write its own just-restored data, it can fail to start
     # entirely, which would otherwise look like an unrelated crash. Fix
     # ownership back to match before starting the container.
-    FAILED_CONTEXT="Fixing ownership of restored data in ${target}"
+    #
+    # Same constraint as "moving aside existing data" above: "docker exec"
+    # needs a RUNNING container, and target is still deliberately stopped
+    # here - a prior version of this fix used "docker exec" directly on
+    # target and silently died on that exact mismatch (set -e killed the
+    # script with no ERR-trap message, since this script has no -E/
+    # errtrace, and the EXIT trap's teardown then made it look like a
+    # normal-if-unexplained test-restore failure). Use the same
+    # --volumes-from helper-container pattern instead, which works
+    # whether or not target itself is running.
+    FAILED_CONTEXT="Resolving ${GITEA_CONTAINER_USER}'s uid/gid for restored-data ownership"
     local restore_uid restore_gid
-    restore_uid="$(timeout 15 docker exec "$target" id -u "$GITEA_CONTAINER_USER" 2>/dev/null)"
-    restore_gid="$(timeout 15 docker exec "$target" id -g "$GITEA_CONTAINER_USER" 2>/dev/null)"
+    restore_uid="$(timeout 15 docker run --rm "$image" id -u "$GITEA_CONTAINER_USER" 2>/dev/null)" || true
+    restore_gid="$(timeout 15 docker run --rm "$image" id -g "$GITEA_CONTAINER_USER" 2>/dev/null)" || true
     if [[ -n "$restore_uid" && -n "$restore_gid" ]]; then
-        timeout "$RESTORE_TIMEOUT" docker exec -u root "$target" chown -R "${restore_uid}:${restore_gid}" "$GITEA_REPO_ROOT" "$APP_DATA_ROOT" \
-            || die "Failed to fix ownership of restored data in ${target}. Container is stopped with restored files in place, owned by root instead of ${GITEA_CONTAINER_USER} - safe to investigate, or fix manually: docker exec -u root ${target} chown -R ${GITEA_CONTAINER_USER}:${GITEA_CONTAINER_USER} ${GITEA_REPO_ROOT} ${APP_DATA_ROOT}"
-        log INFO "Restored data ownership set to ${GITEA_CONTAINER_USER} (uid=${restore_uid}, gid=${restore_gid}) in ${target}."
+        FAILED_CONTEXT="Fixing ownership of restored data in ${target}"
+        timeout "$RESTORE_TIMEOUT" docker run --rm --volumes-from "$target" -u root "$image" \
+            chown -R "${restore_uid}:${restore_gid}" "$GITEA_REPO_ROOT" "$APP_DATA_ROOT" \
+            || die "Failed to fix ownership of restored data in ${target}. Container is stopped with restored files in place, owned by root instead of ${GITEA_CONTAINER_USER} - safe to investigate, or fix manually once it's running: docker exec -u root ${target} chown -R ${GITEA_CONTAINER_USER}:${GITEA_CONTAINER_USER} ${GITEA_REPO_ROOT} ${APP_DATA_ROOT}"
+        log INFO "Restored data ownership set to ${GITEA_CONTAINER_USER} (uid=${restore_uid}, gid=${restore_gid})."
     else
-        log WARN "Could not resolve uid/gid for ${GITEA_CONTAINER_USER} inside ${target}; skipping ownership fix. Restored files are likely owned by root instead of ${GITEA_CONTAINER_USER}, which can prevent Gitea from starting - fix manually if needed: docker exec -u root ${target} chown -R ${GITEA_CONTAINER_USER}:${GITEA_CONTAINER_USER} ${GITEA_REPO_ROOT} ${APP_DATA_ROOT}"
+        log WARN "Could not resolve uid/gid for ${GITEA_CONTAINER_USER} from image ${image}; skipping ownership fix. Restored files are likely owned by root instead of ${GITEA_CONTAINER_USER}, which can prevent Gitea from starting - fix manually if needed once ${target} is running: docker exec -u root ${target} chown -R ${GITEA_CONTAINER_USER}:${GITEA_CONTAINER_USER} ${GITEA_REPO_ROOT} ${APP_DATA_ROOT}"
     fi
 
     if [[ -n "$db_hook" ]]; then
