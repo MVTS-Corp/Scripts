@@ -1,4 +1,4 @@
-README.md v1.2.0 (Last Rev: 2026-08-09)
+README.md v1.3.0 (Last Rev: 2026-08-22)
 
 # linux-updates
 
@@ -18,6 +18,12 @@ detected and supported.
   entry that runs updates on your chosen schedule.
 - Each run emails a summary (success/failure, whether a reboot is required,
   and a tail of the log) to the address(es) you configure.
+- Installs `needs-restarting`/`update-notifier-common` (whichever applies to
+  the distro family) so the reboot-required check has something to query,
+  and `acl` so log directory permissions can be managed with POSIX ACLs.
+- A setup failure (missing config, unsupported/undetected distro) emails an
+  alert too, the same as an update failure, as long as a previous run has
+  already established an alert recipient.
 
 ## Files
 
@@ -58,7 +64,10 @@ settings.
 
 Re-run the installer at any time to change the update mode, schedule, or
 SMTP settings - it's idempotent and will overwrite its own config, not
-anything else on the host. `install.sh` itself is not deployed to
+anything else on the host. Every prompt defaults to your existing setting,
+and an existing SMTP relay config is kept as-is unless you choose to
+reconfigure it, so a re-run to change one thing doesn't require re-entering
+everything else. `install.sh` itself is not deployed to
 `/opt/linux-updates` (only `bin/` and `lib/` are), so reconfigure with
 whichever install method you used originally:
 
@@ -82,10 +91,17 @@ sudo ./install.sh
 | Path | Purpose |
 |---|---|
 | `/opt/linux-updates/` | Deployed copy of `bin/` and `lib/` |
-| `/etc/linux-updates/config.conf` | Update mode + alert recipient |
+| `/etc/linux-updates/config.conf` | Update mode, alert recipient, SMTP "From", log access group |
 | `/etc/linux-updates/msmtprc` | SMTP relay config (mode 600) |
 | `/etc/cron.d/linux-updates` | Cron schedule |
-| `/var/log/linux-updates/` | Per-run logs (kept 30 days) |
+| `/var/log/linux-updates/` | Per-run logs (kept 30 days) and `msmtp.log` (trimmed at 5MB) |
+
+`/var/log/linux-updates/` is root-only (mode 750) by default. The `adm`
+group, if it exists on the host, is also granted read access, matching the
+usual Debian/Ubuntu convention. `install.sh` can optionally grant one more
+group of your choosing read access via a POSIX ACL (requires the `acl`
+package, installed automatically) - useful if you have a dedicated sysadmin
+group that isn't `adm`.
 
 ### Uninstall
 

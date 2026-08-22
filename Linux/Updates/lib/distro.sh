@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 #
 # distro.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-08-22
+# Version: v1.0.1
 #
 # PURPOSE:
 # Detects the host Linux distribution family and its package manager.
 # Sourced, not executed. Requires common.sh (for die) to already be sourced.
+#
+# CHANGELOG:
+#   v1.0.1 - Fedora/RHEL package-manager fallback no longer assumes yum
+#            exists just because dnf doesn't; it now checks for yum too and
+#            leaves PKG_MANAGER empty (unsupported) if neither is present.
 
 # Populates: DISTRO_ID, DISTRO_ID_LIKE, DISTRO_NAME, DISTRO_FAMILY, PKG_MANAGER
 detect_distro() {
@@ -44,8 +49,10 @@ detect_distro() {
         fedora|rhel)
             if command -v dnf >/dev/null 2>&1; then
                 PKG_MANAGER="dnf"
-            else
+            elif command -v yum >/dev/null 2>&1; then
                 PKG_MANAGER="yum"
+            else
+                PKG_MANAGER=""
             fi
             ;;
         *)
