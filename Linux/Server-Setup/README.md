@@ -1,4 +1,4 @@
-README.md v1.1.0 (Last Rev: 2026-08-22)
+README.md v1.2.0 (Last Rev: 2026-08-22)
 
 # Server-Setup
 
@@ -28,7 +28,12 @@ AlmaLinux) also detected and supported.
   admin user you specify, with recursive read/write/execute ACLs on
   `/opt` (including a default ACL so new files inherit it). This step
   delegates to `Linux/Group-MGMT/create-usr_admin-group.sh` rather than
-  duplicating that logic - see that folder's README for details.
+  duplicating that logic - see that folder's README for details. If the
+  group doesn't already exist, you're asked to confirm creating it
+  specifically (separate from the one overall "Proceed?" prompt);
+  declining skips just this step - every other part of provisioning
+  still runs. If the group already exists, no prompt is shown and
+  membership is just ensured, since nothing new is being created.
 - Logs every run to a file, not just the terminal, so a failure during
   an unattended/RMM invocation still leaves a record. The log directory
   is root-only (mode 750) by default; `usr_admin` (once created, above)
@@ -148,6 +153,11 @@ Debian/Ubuntu log-reading convention `Linux/Updates` and
 - **Group/ACL step fails** - see `Group-MGMT/README.md`'s
   Troubleshooting section; the same `create-usr_admin-group.sh` runs
   underneath this step.
+- **"usr_admin: not configured (declined when prompted...)" in the final
+  summary** - not an error; you answered "n" when asked to create the
+  usr_admin group. Every other step still completed. Re-run the script
+  (or just `Group-MGMT/create-usr_admin-group.sh` directly) any time to
+  set it up later - see `Group-MGMT/README.md`.
 - **"Failed to fetch create-usr_admin-group.sh"** - this only happens on
   a standalone run of `setup-server.sh` outside a full repo clone (the
   1-click `bootstrap.sh` install always has the whole repo already, so

@@ -2,9 +2,19 @@
 #
 # setup-server.sh
 # 2026-08-22
-# Version: v1.1.0
+# Version: v1.1.1
 #
 # CHANGELOG:
+#   v1.1.1 - usr_admin group creation is now skippable: if the group does
+#            not already exist, the operator is asked to confirm before
+#            it's created (skipped under --yes/non-interactive, which
+#            create it as before - the up-front provisioning summary
+#            already discloses this). Declining leaves the rest of
+#            provisioning untouched - no /opt ACLs, no usr_admin log
+#            access, but every other step still completes normally. If
+#            the group already exists, no prompt is shown - root and
+#            --admin-user are just added to it as members, same as
+#            before, since nothing new is being created in that case.
 #   v1.1.0 - Runs are now logged to a file, not just the terminal - a
 #            failure during an unattended/RMM invocation (this script is
 #            documented for exactly that use) previously left no record
@@ -61,9 +71,13 @@ Usage: sudo ${0##*/} --admin-user NAME [--timezone TZ] [--yes]
   --admin-user NAME  Existing local username to add (alongside root) to
                      the usr_admin group. Required, except with --check.
                      If omitted on an interactive terminal, you will be
-                     prompted for it instead.
+                     prompted for it instead. If usr_admin doesn't exist
+                     yet, you'll be asked separately to confirm creating
+                     it - declining skips that step only, not the rest
+                     of provisioning.
   --timezone TZ      IANA timezone name (default: America/New_York).
-  --yes              Skip the confirmation prompt before making changes.
+  --yes              Skip all confirmation prompts, including usr_admin
+                     creation if it doesn't already exist.
   --check            Dependency and pre-flight checks only, no changes.
   -h, --help         Show this help text.
 
@@ -169,8 +183,9 @@ if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
     echo "  - Install and enable Cockpit"
     echo "  - Set netplan's renderer to NetworkManager, if netplan is in use (not applied live)"
     echo "  - Enable unattended OS updates"
-    echo "  - Create the usr_admin group (GID 3000) and add root + ${ADMIN_USER}, with rwX ACLs on /opt"
-    echo "    (also granted read access to this run's log once created)"
+    echo "  - Create the usr_admin group (GID 3000) if it doesn't already exist - you'll be asked"
+    echo "    to confirm that specific step - and add root + ${ADMIN_USER}, with rwX ACLs on /opt"
+    echo "    and read access to this run's log"
     echo
     confirm "Proceed?" "y" || { log_info "Aborted, no changes made."; exit 0; }
 fi
@@ -326,8 +341,24 @@ configure_unattended_updates() {
 # 6. usr_admin group + /opt ACLs (delegates to Group-MGMT's own script -
 #    single source of truth, not duplicated logic)
 # ---------------------------------------------------------------------------
+USR_ADMIN_CONFIGURED=0
+
 setup_usr_admin_group() {
     log_info "== usr_admin group and /opt permissions =="
+
+    if getent group usr_admin >/dev/null 2>&1; then
+        log_info "usr_admin group already exists; ensuring root and ${ADMIN_USER} are members..."
+    else
+        if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
+            echo
+            if ! confirm "usr_admin does not exist on this host yet. Create it (GID 3000) and add root + ${ADMIN_USER}?" "y"; then
+                log_info "Declined - skipping usr_admin group creation, /opt ACLs, and log access for it. Continuing with the rest of setup."
+                return 0
+            fi
+        fi
+        log_info "Creating usr_admin group..."
+    fi
+
     if [[ -f "$GROUP_MGMT_LOCAL" ]]; then
         log_info "Using local Group-MGMT/create-usr_admin-group.sh..."
         timeout 300 bash "$GROUP_MGMT_LOCAL" --users "root,${ADMIN_USER}" --yes
@@ -346,12 +377,14 @@ setup_usr_admin_group() {
     setfacl -R -d -m g:usr_admin:rwX /opt
     log_info "usr_admin group and /opt ACLs configured."
 
-    # usr_admin didn't exist when LOG_DIR was first locked down (this is
-    # the step that creates it) - reapply now to also grant it read access
-    # to this and future runs' logs, alongside the "adm" group already
-    # granted at startup.
+    # usr_admin may not have existed when LOG_DIR was first locked down
+    # (this is, on a fresh host, the step that creates it) - reapply now
+    # to also grant it read access to this and future runs' logs,
+    # alongside the "adm" group already granted at startup.
     apply_log_permissions "$LOG_DIR" "usr_admin"
     log_info "usr_admin also granted read access to $LOG_DIR."
+
+    USR_ADMIN_CONFIGURED=1
 }
 
 # ---------------------------------------------------------------------------
@@ -372,7 +405,11 @@ echo
 log_info "Server setup complete."
 echo "  Timezone:    $(timedatectl show --property=Timezone --value)"
 echo "  Cockpit:     https://$(hostname -f 2>/dev/null || hostname):9090"
-echo "  usr_admin:   root, ${ADMIN_USER}  (GID 3000, rwX on /opt, read access on $LOG_DIR)"
+if (( USR_ADMIN_CONFIGURED )); then
+    echo "  usr_admin:   root, ${ADMIN_USER}  (GID 3000, rwX on /opt, read access on $LOG_DIR)"
+else
+    echo "  usr_admin:   not configured (declined when prompted - re-run to set it up later)"
+fi
 echo "  Log:         $SETUP_LOG"
 if command -v netplan >/dev/null 2>&1; then
     netplan_files=(/etc/netplan/*.yaml)
