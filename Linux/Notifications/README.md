@@ -105,6 +105,12 @@ without changing the host-wide default.
 | `/etc/linux-notifications/msmtprc` | SMTP relay config (mode 600) |
 | `/var/log/linux-notifications/` | `msmtp` delivery log |
 
+`/var/log/linux-notifications/` is root-only (mode 750) by default. The
+`adm` group, if it exists on the host, is also granted read access,
+matching the usual Debian/Ubuntu convention - `msmtp.log` contains the
+subject/body of every alert sent through this host, so it is not left
+world-readable.
+
 ### Uninstall
 
 `uninstall.sh` is not deployed to the host either, so it needs a clone of

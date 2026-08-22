@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # install.sh
-# 2026-08-10
-# Version: v1.0.2
+# 2026-08-22
+# Version: v1.0.4
 #
 # PURPOSE:
 # Interactive installer for linux-notifications: installs and configures
@@ -12,6 +12,13 @@
 # settings or default recipient.
 #
 # CHANGELOG:
+#   v1.0.4 - LOG_DIR is now explicitly locked to root:root, mode 750 (plus
+#            the "adm" group, if present, matching the usual Debian/Ubuntu
+#            log-reading convention) instead of being left at whatever
+#            mkdir's inherited umask produced - commonly world-readable
+#            755, which let any local user read msmtp.log, and with it
+#            the subject/body of every alert ever sent through this host.
+#            Matches Linux/Updates' baseline log permissions.
 #   v1.0.3 - config.conf values are now printf %q-escaped instead of being
 #            interpolated with bare double quotes - a DEFAULT_ALERT_TO or
 #            SMTP_FROM value containing a shell metacharacter (e.g. a
@@ -112,6 +119,18 @@ if ! command -v msmtp >/dev/null 2>&1; then
 fi
 
 mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/lib" "$CONFIG_DIR" "$LOG_DIR"
+
+# msmtp.log (configured below) captures the subject/body of every alert
+# sent through this host - lock the directory down rather than leaving it
+# at whatever mkdir's inherited umask produced (commonly world-readable).
+# The "adm" group, if it exists, is also granted read access via standard
+# group ownership - no ACL/extra package needed for that - matching the
+# usual Debian/Ubuntu convention for log-reading access.
+chown root:root "$LOG_DIR"
+chmod 750 "$LOG_DIR"
+if getent group adm >/dev/null 2>&1; then
+    chown root:adm "$LOG_DIR"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. SMTP relay for alerts
