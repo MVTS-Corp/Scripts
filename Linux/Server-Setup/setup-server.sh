@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-08-10
-# Version: v1.0.1
+# 2026-08-22
+# Version: v1.1.0
 #
 # CHANGELOG:
+#   v1.1.0 - Runs are now logged to a file, not just the terminal - a
+#            failure during an unattended/RMM invocation (this script is
+#            documented for exactly that use) previously left no record
+#            once the terminal session that launched it was gone.
+#            LOG_DIR is locked to root:root, mode 750, plus the "adm"
+#            group where present, immediately on creation - the same
+#            baseline Linux/Updates and Linux/Notifications use - and
+#            once usr_admin exists (the last provisioning step), its
+#            permissions are reapplied to also grant that group read
+#            access, since usr_admin can't be granted anything before
+#            this script itself creates it.
 #   v1.0.1 - Added -E (errtrace) so the ERR trap fires on function-
 #            internal failures too, timeout-wrapped the remaining
 #            unbounded external calls (dpkg-reconfigure, systemctl
@@ -34,6 +45,8 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GROUP_MGMT_LOCAL="${SCRIPT_DIR}/../Group-MGMT/create-usr_admin-group.sh"
 GROUP_MGMT_URL="https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Group-MGMT/create-usr_admin-group.sh"
+LOG_DIR="/var/log/server-setup"
+LOG_RETENTION_DAYS=180
 
 ADMIN_USER=""
 TIMEZONE="America/New_York"
@@ -102,6 +115,22 @@ trap 'fail_trap "$LINENO"' ERR
 require_root
 
 # ---------------------------------------------------------------------------
+# Logging: capture this run to a file, not just the terminal, so a failure
+# during an unattended/RMM invocation (see README "Quick Start") leaves a
+# record instead of vanishing with the terminal session. Started this
+# early - right after require_root, before anything that can actually
+# fail - so a failure at any later step is captured. LOG_DIR is locked
+# down immediately after creation; usr_admin can't be granted access yet
+# since setup_usr_admin_group() (the step that creates it) hasn't run -
+# permissions are reapplied there once the group exists.
+# ---------------------------------------------------------------------------
+mkdir -p "$LOG_DIR" || die "Cannot create log directory: $LOG_DIR"
+apply_log_permissions "$LOG_DIR"
+SETUP_LOG="$LOG_DIR/setup-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$SETUP_LOG") 2>&1
+log_info "Logging this run to $SETUP_LOG"
+
+# ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
 log_info "Detecting Linux distribution..."
@@ -141,6 +170,7 @@ if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
     echo "  - Set netplan's renderer to NetworkManager, if netplan is in use (not applied live)"
     echo "  - Enable unattended OS updates"
     echo "  - Create the usr_admin group (GID 3000) and add root + ${ADMIN_USER}, with rwX ACLs on /opt"
+    echo "    (also granted read access to this run's log once created)"
     echo
     confirm "Proceed?" "y" || { log_info "Aborted, no changes made."; exit 0; }
 fi
@@ -315,6 +345,13 @@ setup_usr_admin_group() {
     setfacl -R -m g:usr_admin:rwX /opt
     setfacl -R -d -m g:usr_admin:rwX /opt
     log_info "usr_admin group and /opt ACLs configured."
+
+    # usr_admin didn't exist when LOG_DIR was first locked down (this is
+    # the step that creates it) - reapply now to also grant it read access
+    # to this and future runs' logs, alongside the "adm" group already
+    # granted at startup.
+    apply_log_permissions "$LOG_DIR" "usr_admin"
+    log_info "usr_admin also granted read access to $LOG_DIR."
 }
 
 # ---------------------------------------------------------------------------
@@ -327,11 +364,16 @@ configure_netplan_renderer
 configure_unattended_updates
 setup_usr_admin_group
 
+# Retention cleanup: non-fatal by design - a failure here must not flip an
+# otherwise-successful provisioning run into a reported failure.
+find "$LOG_DIR" -name 'setup-*.log' -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
+
 echo
 log_info "Server setup complete."
 echo "  Timezone:    $(timedatectl show --property=Timezone --value)"
 echo "  Cockpit:     https://$(hostname -f 2>/dev/null || hostname):9090"
-echo "  usr_admin:   root, ${ADMIN_USER}  (GID 3000, rwX on /opt)"
+echo "  usr_admin:   root, ${ADMIN_USER}  (GID 3000, rwX on /opt, read access on $LOG_DIR)"
+echo "  Log:         $SETUP_LOG"
 if command -v netplan >/dev/null 2>&1; then
     netplan_files=(/etc/netplan/*.yaml)
     if [[ -e "${netplan_files[0]}" ]]; then

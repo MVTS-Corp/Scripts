@@ -1,4 +1,4 @@
-README.md v1.0.0 (Last Rev: 2026-08-09)
+README.md v1.1.0 (Last Rev: 2026-08-22)
 
 # Server-Setup
 
@@ -29,6 +29,10 @@ AlmaLinux) also detected and supported.
   `/opt` (including a default ACL so new files inherit it). This step
   delegates to `Linux/Group-MGMT/create-usr_admin-group.sh` rather than
   duplicating that logic - see that folder's README for details.
+- Logs every run to a file, not just the terminal, so a failure during
+  an unattended/RMM invocation still leaves a record. The log directory
+  is root-only (mode 750) by default; `usr_admin` (once created, above)
+  is also granted read access, alongside the `adm` group where present.
 
 Every step is idempotent - safe to re-run against a host that's already
 been set up, whether to pick up a change or just to confirm nothing
@@ -103,6 +107,20 @@ Override with `--timezone <IANA name>`, e.g. `--timezone
 America/Chicago`. Run `timedatectl list-timezones` on the host to see
 valid values.
 
+### Files It Manages on the Host
+
+| Path | Purpose |
+|---|---|
+| `/var/log/server-setup/` | Per-run logs, `setup-<timestamp>.log` (kept 180 days) |
+
+`/var/log/server-setup/` is root-only (mode 750) by default. It's locked
+down as soon as it's created - before `usr_admin` exists - so the `adm`
+group (if present on the host) is granted read access first; once
+`usr_admin` is created later in the same run, its permissions are
+reapplied to also grant that group read access, matching the same
+Debian/Ubuntu log-reading convention `Linux/Updates` and
+`Linux/Notifications` use.
+
 ## Troubleshooting
 
 - **"Could not determine a supported package manager"** - the host's
@@ -135,3 +153,6 @@ valid values.
   1-click `bootstrap.sh` install always has the whole repo already, so
   this path is not used there). Check network connectivity to
   raw.githubusercontent.com, or clone the full repo instead.
+- **Where's the run log?** - `/var/log/server-setup/setup-<timestamp>.log`,
+  one per run, kept 180 days. Readable by root, `usr_admin`, and (where
+  present) `adm`; nobody else.
