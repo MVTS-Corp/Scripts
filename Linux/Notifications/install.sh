@@ -12,6 +12,12 @@
 # settings or default recipient.
 #
 # CHANGELOG:
+#   v1.0.3 - config.conf values are now printf %q-escaped instead of being
+#            interpolated with bare double quotes - a DEFAULT_ALERT_TO or
+#            SMTP_FROM value containing a shell metacharacter (e.g. a
+#            trailing `"$(...)`) previously allowed injection into a file
+#            this tool's own send-alert command bash-sources on every
+#            invocation. Matches the same fix in Linux/Updates/install.sh.
 #   v1.0.2 - Preseed the msmtp/apparmor debconf question and pass
 #            DEBIAN_FRONTEND=noninteractive on Debian-family hosts. Without
 #            this, `apt-get install msmtp` drops into an interactive
@@ -179,8 +185,8 @@ ln -sf "$INSTALL_DIR/bin/send-alert.sh" "$BIN_LINK"
 log_info "Writing config to $CONFIG_FILE..."
 {
     echo "# Managed by linux-notifications installer - do not edit manually"
-    echo "DEFAULT_ALERT_TO=\"$DEFAULT_ALERT_TO\""
-    echo "SMTP_FROM=\"$SMTP_FROM\""
+    printf 'DEFAULT_ALERT_TO=%q\n' "$DEFAULT_ALERT_TO"
+    printf 'SMTP_FROM=%q\n' "$SMTP_FROM"
 } > "$CONFIG_FILE"
 chmod 644 "$CONFIG_FILE"
 

@@ -45,7 +45,7 @@ Usage: sudo ${0##*/} [--users user1,user2,...] [--gid N] [--yes]
 
 Examples:
   sudo ./${0##*/}                          # interactive
-  sudo ./${0##*/} --users jsmith,tzh-freepbx-admin --yes
+  sudo ./${0##*/} --users jsmith,asmith --yes
 EOF
 }
 

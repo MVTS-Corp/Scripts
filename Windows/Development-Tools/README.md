@@ -64,8 +64,8 @@ irm "$base/Run-Install-DevTools.cmd" -OutFile Run-Install-DevTools.cmd
 - **GitHub Desktop**: its official installer only supports a per-user install with no custom
   path (a Squirrel/upstream limitation, not something this script can work around). It installs
   to the standard per-user location for the account that ran the installer; the real path is
-  recorded in `C:\DATA\Tools\GitHubDesktop\INSTALL_LOCATION.txt` and in the
-  `GITHUB_DESKTOP_HOME` environment variable.
+  recorded in the `GITHUB_DESKTOP_HOME` environment variable (nothing is left under
+  `C:\DATA\Tools` for it, since there is no real location to point at there).
 - **Gitea**: only the `gitea.exe` binary is installed (`C:\DATA\Tools\Gitea\gitea.exe`). It is
   not configured or running as a service, since that requires site-specific choices (ports,
   database, HTTPS, data directory) this script cannot guess. See

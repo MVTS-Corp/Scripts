@@ -27,7 +27,7 @@ sudo ./create-usr_admin-group.sh
 Unattended, from an RMM or orchestration tool:
 
 ```bash
-sudo ./create-usr_admin-group.sh --users jsmith,tzh-freepbx-admin --yes
+sudo ./create-usr_admin-group.sh --users jsmith,asmith --yes
 ```
 
 Pulling and running directly from GitHub in one line (useful for a quick

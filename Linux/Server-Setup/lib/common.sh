@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 #
 # common.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-08-22
+# Version: v1.0.1
 #
 # PURPOSE:
 # Shared logging and helper functions used across Server-Setup scripts.
 # Sourced, not executed. Deliberately a standalone copy rather than one
 # shared with another Linux/ tool - see Linux/Notifications/lib/common.sh
 # for why (each tool stays independently clone-and-installable).
+#
+# CHANGELOG:
+#   v1.0.1 - confirm() now accepts yes/Yes/YES, not just a bare y/Y,
+#            matching Linux/Updates/lib/common.sh.
 
 COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
@@ -32,7 +36,7 @@ confirm() {
     [[ "$default" == "y" ]] && hint="Y/n"
     read -r -p "$prompt [$hint] " reply
     reply="${reply:-$default}"
-    [[ "$reply" =~ ^[Yy]$ ]]
+    [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
 # ask "Prompt text" [default value] -> echoes the answer
