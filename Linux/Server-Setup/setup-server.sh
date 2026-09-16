@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-08-22
-# Version: v1.1.1
+# 2026-09-15
+# Version: v1.1.2
 #
 # CHANGELOG:
+#   v1.1.2 - Export DEBIAN_FRONTEND=noninteractive and NEEDRESTART_MODE=a
+#            before any apt-get call. bootstrap.sh reattaches /dev/tty so
+#            this script's own prompts work over curl|sudo bash, but that
+#            also makes apt-listchanges (pulled in by unattended-upgrades)
+#            and needrestart think they have a real interactive terminal
+#            and block on a pager/whiptail dialog that nothing answers -
+#            observed hanging the run past the point Ctrl+C could recover
+#            it, requiring a reboot.
 #   v1.1.1 - usr_admin group creation is now skippable: if the group does
 #            not already exist, the operator is asked to confirm before
 #            it's created (skipped under --yes/non-interactive, which
@@ -51,6 +59,16 @@
 #   No config file - everything is a flag or an interactive prompt.
 
 set -Eeuo pipefail
+
+# bootstrap.sh reattaches /dev/tty so this script's own ask/confirm prompts
+# work when run via curl|sudo bash - but that also makes apt/dpkg think
+# it has a real interactive terminal. Without these, apt-listchanges
+# (pulled in by unattended-upgrades) launches a pager waiting for a
+# keypress, and needrestart pops a whiptail dialog asking which services
+# to restart - either blocks apt-get indefinitely, deep enough in a dpkg
+# postinst hook that Ctrl+C doesn't reliably reach it.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GROUP_MGMT_LOCAL="${SCRIPT_DIR}/../Group-MGMT/create-usr_admin-group.sh"
