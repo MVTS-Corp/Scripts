@@ -55,14 +55,16 @@ drifted.
 ## Quick Start
 
 **1-click install** - downloads the repo and runs the provisioner in one
-command (prompts for the admin username if not given):
+command. The user who ran `sudo` is added to `usr_admin` automatically
+(pass `--admin-user` to name someone else; if run directly as root with no
+`--admin-user`, it prompts for the username instead):
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)"
 ```
 
-Or with the admin username given up front (`bootstrap` is just the
-script's `$0` placeholder and must be there):
+Or naming a different admin user (`bootstrap` is just the script's `$0`
+placeholder and must be there):
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)" bootstrap --admin-user jsmith
@@ -75,11 +77,11 @@ up front:
 curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --admin-user jsmith --yes
 ```
 
-Do not use `curl ... | sudo bash` without `--admin-user` and `--yes`. Piping
-into sudo leaves the script outside its terminal's foreground process
-group on newer sudo (seen on Ubuntu 26.04), so any prompt hangs or is
-refused. Passing both flags means nothing ever prompts, so the pipe form
-is safe there.
+Do not use `curl ... | sudo bash` without `--yes`. Piping into sudo leaves
+the script outside its terminal's foreground process group on newer sudo
+(seen on Ubuntu 26.04), so any prompt hangs or is refused. With `--yes`
+nothing ever prompts (the admin user comes from `--admin-user`, or from
+the invoking sudo user), so the pipe form is safe there.
 
 If you'd rather inspect the code before running it as root, clone and
 run manually instead:

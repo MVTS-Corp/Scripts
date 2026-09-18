@@ -25,7 +25,8 @@
 #   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)"
 #   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)" bootstrap --admin-user jsmith
 #
-# Usage (unattended - must pass both --admin-user and --yes, so nothing prompts):
+# Usage (unattended - must pass --yes so nothing prompts; --admin-user is
+# optional and defaults to the invoking sudo user):
 #   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --admin-user jsmith --yes
 
 set -euo pipefail

@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-09-15
-# Version: v1.1.2
+# 2026-09-18
+# Version: v1.2.0
 #
 # CHANGELOG:
+#   v1.2.0 - --admin-user now defaults to the invoking sudo user
+#            ($SUDO_USER) instead of prompting, when that is a real,
+#            non-root local account. --admin-user still overrides it, and
+#            root-with-no-sudo still prompts (or errors if there is no
+#            terminal). Note this also lets an unattended run pass --yes
+#            alone and act on the invoking user, which previously errored.
 #   v1.1.2 - Export DEBIAN_FRONTEND=noninteractive and NEEDRESTART_MODE=a
 #            before any apt-get call. bootstrap.sh reattaches /dev/tty so
 #            this script's own prompts work over curl|sudo bash, but that
@@ -87,9 +93,11 @@ Usage: sudo ${0##*/} --admin-user NAME [--timezone TZ] [--yes]
        sudo ${0##*/} --check
 
   --admin-user NAME  Existing local username to add (alongside root) to
-                     the usr_admin group. Required, except with --check.
-                     If omitted on an interactive terminal, you will be
-                     prompted for it instead. If usr_admin doesn't exist
+                     the usr_admin group. If omitted, defaults to the user
+                     who ran sudo (\$SUDO_USER); if that isn't available
+                     (run directly as root), you are prompted instead, or
+                     it is required when no terminal is attached (except
+                     with --check). If usr_admin doesn't exist
                      yet, you'll be asked separately to confirm creating
                      it - declining skips that step only, not the rest
                      of provisioning.
@@ -175,6 +183,15 @@ log_info "Detected: $DISTRO_NAME  (family=$DISTRO_FAMILY, package manager=$PKG_M
 for cmd in timedatectl systemctl awk id curl; do
     command -v "$cmd" >/dev/null 2>&1 || die "Missing required command: ${cmd}. This is not a standard Linux environment."
 done
+
+# No --admin-user given: default to the person who ran sudo, since that is
+# almost always the account being set up. Not used when SUDO_USER is unset
+# (run directly as root) or is root itself; those fall through to the prompt.
+if [[ -z "$ADMIN_USER" && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] \
+    && id -u "$SUDO_USER" >/dev/null 2>&1; then
+    ADMIN_USER="$SUDO_USER"
+    log_info "No --admin-user given; using the invoking sudo user: ${ADMIN_USER} (pass --admin-user NAME to use someone else)."
+fi
 
 if [[ -z "$ADMIN_USER" ]]; then
     if [[ -t 0 ]]; then
