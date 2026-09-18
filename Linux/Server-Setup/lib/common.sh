@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # common.sh
-# 2026-08-22
-# Version: v1.1.0
+# 2026-09-17
+# Version: v1.2.0
 #
 # PURPOSE:
 # Shared logging and helper functions used across Server-Setup scripts.
@@ -11,6 +11,17 @@
 # for why (each tool stays independently clone-and-installable).
 #
 # CHANGELOG:
+#   v1.2.0 - ask()/confirm() now wait_for_tty_foreground() before reading.
+#            Observed in the field: bootstrap.sh's `curl | sudo bash`
+#            invocation escalates through sudo, which allocates a fresh
+#            pty for the child. There is a brief window after that where
+#            the new pty's foreground process group has not yet been set
+#            to match the running script - a read() from the terminal
+#            during that window gets SIGTTIN and stops the process, and
+#            since nothing here is an interactive job-control shell that
+#            would send SIGCONT on focus, it stayed stopped forever
+#            (state T), requiring a reboot to clear. Now bounded to a 5s
+#            wait with a clear error instead of hanging indefinitely.
 #   v1.1.0 - Added apply_log_permissions(), matching Linux/Updates/lib/
 #            common.sh, so setup-server.sh's run log is locked down
 #            instead of left at whatever mkdir's inherited umask produced.
@@ -33,10 +44,33 @@ require_root() {
     fi
 }
 
+# wait_for_tty_foreground - blocks a bounded amount of time until this
+# process is in the foreground process group of its controlling terminal,
+# so the read() in ask()/confirm() cannot land in the sudo-pty race
+# described in the CHANGELOG above. No-op when stdin isn't a terminal, or
+# when `ps` isn't available to check (best-effort, matches the rest of
+# this file's degrade-to-warning style - not worth failing setup over).
+wait_for_tty_foreground() {
+    [[ -t 0 ]] || return 0
+    command -v ps >/dev/null 2>&1 || return 0
+
+    local waited_ms=0 my_pgid tty_pgid
+    while (( waited_ms < 5000 )); do
+        my_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+        tty_pgid="$(ps -o tpgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+        [[ -n "$my_pgid" && "$my_pgid" == "$tty_pgid" ]] && return 0
+        sleep 0.1
+        (( waited_ms += 100 ))
+    done
+
+    die "Terminal is not ready for interactive input after 5s (this process's controlling terminal never became foreground - a known race with sudo's pty allocation over 'curl | sudo bash'). Re-run with --admin-user NAME --yes to skip prompts, or run setup-server.sh from a direct clone instead of piping it."
+}
+
 # confirm "Prompt text" [default y|n]
 confirm() {
     local prompt="$1" default="${2:-y}" reply hint="y/N"
     [[ "$default" == "y" ]] && hint="Y/n"
+    wait_for_tty_foreground
     read -r -p "$prompt [$hint] " reply
     reply="${reply:-$default}"
     [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
@@ -45,6 +79,7 @@ confirm() {
 # ask "Prompt text" [default value] -> echoes the answer
 ask() {
     local prompt="$1" default="${2:-}" reply
+    wait_for_tty_foreground
     if [[ -n "$default" ]]; then
         read -r -p "$prompt [$default]: " reply
         echo "${reply:-$default}"
