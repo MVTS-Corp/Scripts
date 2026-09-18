@@ -2,9 +2,13 @@
 #
 # setup-server.sh
 # 2026-09-18
-# Version: v1.2.1
+# Version: v1.2.2
 #
 # CHANGELOG:
+#   v1.2.2 - The netplan renderer insert (awk path) now preserves the
+#            original file's mode and owner. It previously replaced the
+#            file with a default-umask copy (644), which made netplan warn
+#            "Permissions ... are too open" and could expose secrets.
 #   v1.2.1 - Every `timeout` call now runs with --foreground (via a
 #            wrapper function). Without it, timeout moved apt-get into a
 #            new background process group; once apt/dpkg/a hook touched
@@ -338,10 +342,16 @@ configure_netplan_renderer() {
             sed -i -E 's/^([[:space:]]*renderer:[[:space:]]*).*/\1NetworkManager/' "$f"
             log_info "  ${f}: updated existing renderer to NetworkManager (backup saved alongside it)."
         else
-            awk '
+            # Netplan configs can hold secrets (wifi passwords) and netplan
+            # warns unless they're 600: create the temp file private, then
+            # copy the original's mode/owner before it replaces the original.
+            ( umask 077; awk '
                 { print }
                 /^network:[[:space:]]*$/ && !done { print "  renderer: NetworkManager"; done=1 }
-            ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+            ' "$f" > "${f}.tmp" ) \
+                && chmod --reference="$f" "${f}.tmp" \
+                && chown --reference="$f" "${f}.tmp" \
+                && mv "${f}.tmp" "$f"
             grep -Eq '^[[:space:]]*renderer:[[:space:]]*NetworkManager[[:space:]]*$' "$f" \
                 || die "Failed to insert 'renderer: NetworkManager' into ${f} - its 'network:' line was not in the expected format (expected a bare 'network:' key with no trailing content on that line). Edit it manually (a backup was saved alongside it)."
             log_info "  ${f}: added renderer: NetworkManager (backup saved alongside it)."
