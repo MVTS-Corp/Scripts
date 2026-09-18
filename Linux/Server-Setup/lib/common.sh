@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # common.sh
-# 2026-09-17
-# Version: v1.2.0
+# 2026-09-18
+# Version: v1.2.1
 #
 # PURPOSE:
 # Shared logging and helper functions used across Server-Setup scripts.
@@ -11,6 +11,10 @@
 # for why (each tool stays independently clone-and-installable).
 #
 # CHANGELOG:
+#   v1.2.1 - wait_for_tty_foreground() now logs pgid/tpgid/stdin/tty/ps
+#            state when it gives up, and its error message no longer calls
+#            this a "race": the 5s wait never succeeded on the affected
+#            host, so the mismatch is persistent, not transient.
 #   v1.2.0 - ask()/confirm() now wait_for_tty_foreground() before reading.
 #            Observed in the field: bootstrap.sh's `curl | sudo bash`
 #            invocation escalates through sudo, which allocates a fresh
@@ -63,7 +67,12 @@ wait_for_tty_foreground() {
         (( waited_ms += 100 ))
     done
 
-    die "Terminal is not ready for interactive input after 5s (this process's controlling terminal never became foreground - a known race with sudo's pty allocation over 'curl | sudo bash'). Re-run with --admin-user NAME --yes to skip prompts, or run setup-server.sh from a direct clone instead of piping it."
+    log_error "Terminal diagnostics at failure (share these when reporting this):"
+    log_error "  this process: pgid='${my_pgid:-?}'  terminal foreground pgid (tpgid)='${tty_pgid:-?}'"
+    log_error "  stdin: $(readlink /proc/$$/fd/0 2>/dev/null || echo '?')  tty: $(tty 2>/dev/null || echo '?')"
+    log_error "  ps: $(ps -o pid=,ppid=,pgid=,sid=,tpgid=,tty=,stat= -p $$ 2>/dev/null | tr -s ' ' || echo '?')  (pid ppid pgid sid tpgid tty stat)"
+    log_error "  SUDO_COMMAND='${SUDO_COMMAND:-}'  sudo pty in use: $([[ -n "${SUDO_TTY:-}" ]] && echo "yes (SUDO_TTY=${SUDO_TTY})" || echo 'no/unknown')"
+    die "Terminal is not ready for interactive input after 5s (this process is not in its controlling terminal's foreground process group, so reading would stop it). Likely cause: piping through 'curl | sudo bash'. Re-run with --admin-user NAME --yes to skip prompts, use: sudo bash -c \"\$(curl -fsSL <bootstrap.sh URL>)\", or run setup-server.sh from a direct clone."
 }
 
 # confirm "Prompt text" [default y|n]
