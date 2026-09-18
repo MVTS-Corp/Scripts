@@ -2,9 +2,15 @@
 #
 # setup-server.sh
 # 2026-09-18
-# Version: v1.2.0
+# Version: v1.2.1
 #
 # CHANGELOG:
+#   v1.2.1 - Every `timeout` call now runs with --foreground (via a
+#            wrapper function). Without it, timeout moved apt-get into a
+#            new background process group; once apt/dpkg/a hook touched
+#            the terminal, the kernel stopped it (state T, ps showed
+#            pgid != the terminal's tpgid) and Ctrl+C couldn't reach it,
+#            hanging the run at the Cockpit install.
 #   v1.2.0 - --admin-user now defaults to the invoking sudo user
 #            ($SUDO_USER) instead of prompting, when that is a real,
 #            non-root local account. --admin-user still overrides it, and
@@ -75,6 +81,14 @@ set -Eeuo pipefail
 # postinst hook that Ctrl+C doesn't reliably reach it.
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
+
+# Plain `timeout` runs its command in a new background process group. The
+# moment apt-get/dpkg (or a hook under them) touches the terminal, the
+# kernel stops that group (state T) and Ctrl+C can't reach it, since it
+# isn't the foreground group. --foreground keeps the command in this
+# script's group. Tradeoff: on expiry only the direct child gets the
+# signal, not its descendants.
+timeout() { command timeout --foreground "$@"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GROUP_MGMT_LOCAL="${SCRIPT_DIR}/../Group-MGMT/create-usr_admin-group.sh"
