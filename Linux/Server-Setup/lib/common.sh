@@ -2,7 +2,7 @@
 #
 # common.sh
 # 2026-09-18
-# Version: v1.2.1
+# Version: v1.2.2
 #
 # PURPOSE:
 # Shared logging and helper functions used across Server-Setup scripts.
@@ -11,6 +11,12 @@
 # for why (each tool stays independently clone-and-installable).
 #
 # CHANGELOG:
+#   v1.2.2 - ask()/confirm() read through readline (read -e) on a
+#            terminal. With plain read, a terminal whose Backspace code
+#            doesn't match the tty's erase character moved the cursor
+#            without deleting, and Ctrl+Backspace then erased the whole
+#            line including the prompt. Prompts and typed answers no
+#            longer appear in the run log (they go to /dev/tty only).
 #   v1.2.1 - wait_for_tty_foreground() now logs pgid/tpgid/stdin/tty/ps
 #            state when it gives up, and its error message no longer calls
 #            this a "race": the 5s wait never succeeded on the affected
@@ -75,12 +81,28 @@ wait_for_tty_foreground() {
     die "Terminal is not ready for interactive input after 5s (this process is not in its controlling terminal's foreground process group, so reading would stop it). Likely cause: piping through 'curl | sudo bash'. Re-run with --admin-user NAME --yes to skip prompts, use: sudo bash -c \"\$(curl -fsSL <bootstrap.sh URL>)\", or run setup-server.sh from a direct clone."
 }
 
+# read_reply "Prompt text" - reads one line into the caller's $reply.
+# On a terminal it uses readline (-e) so Backspace/Ctrl+Backspace/arrows
+# work whatever erase code the terminal sends; plain `read` leaves editing
+# to the tty driver, which mishandles a mismatched Backspace (cursor moves
+# but nothing is deleted) and can erase the prompt itself. Readline draws
+# on stderr, which setup-server.sh pipes through tee, so it is pointed at
+# /dev/tty for the duration of the read; that also keeps editing escape
+# sequences out of the log file.
+read_reply() {
+    if [[ -t 0 ]] && { : >/dev/tty; } 2>/dev/null; then
+        read -e -r -p "$1" reply 2>/dev/tty
+    else
+        read -r -p "$1" reply
+    fi
+}
+
 # confirm "Prompt text" [default y|n]
 confirm() {
     local prompt="$1" default="${2:-y}" reply hint="y/N"
     [[ "$default" == "y" ]] && hint="Y/n"
     wait_for_tty_foreground
-    read -r -p "$prompt [$hint] " reply
+    read_reply "$prompt [$hint] "
     reply="${reply:-$default}"
     [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
@@ -90,10 +112,10 @@ ask() {
     local prompt="$1" default="${2:-}" reply
     wait_for_tty_foreground
     if [[ -n "$default" ]]; then
-        read -r -p "$prompt [$default]: " reply
+        read_reply "$prompt [$default]: "
         echo "${reply:-$default}"
     else
-        read -r -p "$prompt: " reply
+        read_reply "$prompt: "
         echo "$reply"
     fi
 }
