@@ -58,7 +58,14 @@ drifted.
 command (prompts for the admin username if not given):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)"
+```
+
+Or with the admin username given up front (`bootstrap` is just the
+script's `$0` placeholder and must be there):
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)" bootstrap --admin-user jsmith
 ```
 
 Non-interactive (RMM/automation), admin username and confirmation given
@@ -67,6 +74,12 @@ up front:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --admin-user jsmith --yes
 ```
+
+Do not use `curl ... | sudo bash` without `--admin-user` and `--yes`. Piping
+into sudo leaves the script outside its terminal's foreground process
+group on newer sudo (seen on Ubuntu 26.04), so any prompt hangs or is
+refused. Passing both flags means nothing ever prompts, so the pipe form
+is safe there.
 
 If you'd rather inspect the code before running it as root, clone and
 run manually instead:

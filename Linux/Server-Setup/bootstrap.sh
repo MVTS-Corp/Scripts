@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 #
 # bootstrap.sh
-# 2026-08-09
-# Version: v1.0.0
+# 2026-09-18
+# Version: v1.0.1
+#
+# CHANGELOG:
+#   v1.0.1 - Documented `sudo bash -c "$(curl ...)"` as the interactive
+#            form. Piping into sudo (`curl | sudo bash`) leaves the script
+#            outside its pty's foreground process group on newer sudo
+#            (seen on Ubuntu 26.04), so any prompt hangs or is refused.
+#            The pipe form remains fine for unattended runs that pass
+#            --admin-user and --yes, since those never prompt.
 #
 # PURPOSE:
 # One-line remote installer for Server-Setup. Downloads a snapshot of the
@@ -13,8 +21,11 @@
 # and reattaches the terminal so its prompts work. Any arguments given
 # to this script are passed straight through to setup-server.sh.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash
+# Usage (interactive - prompts for the admin username):
+#   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)"
+#   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)" bootstrap --admin-user jsmith
+#
+# Usage (unattended - must pass both --admin-user and --yes, so nothing prompts):
 #   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --admin-user jsmith --yes
 
 set -euo pipefail
@@ -23,7 +34,7 @@ REPO_TARBALL_URL="https://github.com/MVTS-Corp/Scripts/archive/refs/heads/main.t
 INSTALL_SUBPATH="Linux/Server-Setup"
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    echo "This installer must be run as root (try: curl -fsSL ... | sudo bash)" >&2
+    echo "This installer must be run as root (try: sudo bash -c \"\$(curl -fsSL ...)\")" >&2
     exit 1
 fi
 
