@@ -1,4 +1,4 @@
-README.md v1.3.0 (Last Rev: 2026-09-19)
+README.md v1.4.0 (Last Rev: 2026-09-19)
 
 # Server-Setup
 
@@ -16,6 +16,11 @@ AlmaLinux) also detected and supported.
   Debian/Ubuntu, `bind-utils` on Fedora/RHEL), `NetworkManager`, `acl`,
   `unzip`.
 - Sets the system timezone (default `America/New_York`, overridable).
+- Shows the current time server configuration and asks whether it needs
+  to change (default: no). If yes, it hands off to
+  `Linux/NTP-Config/configure-ntp-server.sh` so the server gets accurate
+  time sources; if no, setup moves on. See
+  [Time Synchronization](#time-synchronization-ntp) below.
 - Installs and enables Cockpit, opening the firewall for it if a host
   firewall (`firewalld` or `ufw`) is active.
 - On Debian/Ubuntu hosts using netplan, sets `renderer: NetworkManager`
@@ -45,6 +50,10 @@ Every step is idempotent - safe to re-run against a host that's already
 been set up, whether to pick up a change or just to confirm nothing
 drifted.
 
+Exit codes: `0` success, `1` failure (or you chose to exit after an NTP
+error), `3` completed but one or more items are flagged for review (see
+[Time Synchronization](#time-synchronization-ntp)).
+
 ## Files
 
 - `bootstrap.sh` - remote-install entry point: downloads a repo snapshot
@@ -53,6 +62,26 @@ drifted.
 - `setup-server.sh` - the provisioning script itself.
 - `lib/distro.sh` - distro/package-manager detection.
 - `lib/common.sh` - shared logging/prompt helpers.
+
+It also calls two sibling tools in this repo rather than duplicating them:
+`../Group-MGMT/create-usr_admin-group.sh` (the `usr_admin` step) and
+`../NTP-Config/configure-ntp-server.sh` (the time synchronization step).
+Both are used from the sibling folder when present (the 1-click install and
+a full clone always have them) and fetched from GitHub otherwise.
+
+Options for the time synchronization step (see `--help` for all options):
+
+| Option | Meaning |
+| --- | --- |
+| `--skip-ntp` | Skip the step entirely. |
+| `--ntp-sources V` | Set the time sources without prompting: `native`, `usa`, `preferred`, or a comma separated list of hostnames/IPs. |
+| `--ntp-allow CIDRS` | Set the subnets allowed to query this host for time (comma separated), or `none`. Repeatable. |
+| `--ntp-stratum N` | Set the local stratum lock (0-15), or `none`. |
+
+The three `--ntp-*` options go straight to `configure-ntp-server.sh`'s
+own unattended interface (see `NTP-Config/README.md`, "Calling From Another
+Script"), which checks them before changing anything and does nothing if the
+host already matches.
 
 ## Quick Start
 
@@ -106,6 +135,48 @@ Reachable at `https://<host>:9090` once the script completes. If a host
 firewall is active, TCP 9090 was opened automatically; if you add a
 firewall later, allow that port for Cockpit yourself.
 
+### Time Synchronization (NTP)
+
+This step runs right after the timezone, so the clock is right for the TLS
+and package operations that follow. It first prints the current state: the
+active time daemon, whether the clock is synchronized, and (when chrony is
+installed) NTP-Config's full status report of sources, allowed subnets,
+stratum lock, and `chronyc` output. If chrony is not installed yet, it says
+so and shows what `systemd-timesyncd` is using instead.
+
+Then, in an interactive run, it asks **"Do you need to change the time
+server configuration?"** (default: no).
+
+- **No:** nothing is changed or installed, and setup moves on.
+- **Yes:** it starts NTP-Config's interactive menu. Installing chrony (if
+  missing), choosing upstream sources, allowed subnets, and a stratum lock
+  all happen there. When you choose Exit with changes still pending, the
+  tool offers to apply them and restart chrony (default yes), restoring its
+  backup if chrony rejects the new config.
+
+Unattended runs (`--yes`, or no terminal) have nobody to ask, so by default
+they only show the configuration and leave it as it is. Pass `--ntp-sources`,
+`--ntp-allow`, and/or `--ntp-stratum` to configure it unattended, or
+`--skip-ntp` to leave the step out.
+
+`configure-ntp-server.sh` is run from where it is found and is **not
+installed** on the host by this step. Use the sibling copy in the repo
+snapshot when present; otherwise it is fetched from the NTP-Config `stable`
+channel. To keep it installed with self-updates, use the one-liner in
+`NTP-Config/README.md`. Note that the 1-click install downloads `main`, so
+the sibling copy there is the `main` version of the tool.
+
+**If the NTP step fails** (the tool cannot be fetched, chrony will not start
+on the new config, the arguments are rejected, and so on), the error is shown
+and you are asked to **Exit** setup right there or **Skip** NTP and continue.
+Either way a record is appended to `/var/log/server-setup/audit.log`: when it
+happened, the host, who ran it (the sudo user and login user) and the admin
+user, what failed, the exit code, the NTP tool's version and where it came
+from, and the last 20 lines of the run log. Unattended runs always skip. A
+skipped NTP step is flagged under "FLAGGED FOR REVIEW" in the final summary
+and the run exits `3` instead of `0`, so an RMM or wrapper can tell a clean
+run from one that needs a look. Re-running the script retries the step.
+
 ### netplan (Debian/Ubuntu only)
 
 If the host uses netplan, the renderer change is validated (`netplan
@@ -152,6 +223,7 @@ valid values.
 | Path | Purpose |
 |---|---|
 | `/var/log/server-setup/` | Per-run logs, `setup-<timestamp>.log` (kept 180 days) |
+| `/var/log/server-setup/audit.log` | Append-only record of items flagged for review (NTP step failures); created on the first one, never pruned automatically |
 | `/etc/dracut.conf.d/10-no-network.conf` | dracut hosts only: keeps networking out of the initramfs (see netplan above) |
 
 `/var/log/server-setup/` is root-only (mode 750) by default. It's locked
@@ -186,6 +258,18 @@ Debian/Ubuntu log-reading convention `Linux/Updates` and
   re-run.
 - **"dnf-automatic.timer did not become active"** - check `systemctl
   status dnf-automatic.timer` for the underlying error.
+- **"NTP configuration failed: ..." and an Exit/Skip prompt** - see
+  `/var/log/server-setup/audit.log` (the newest block at the bottom) for the
+  full record, and the run log for the tool's own output. Common causes: no
+  route to `raw.githubusercontent.com` on a standalone run ("Failed to fetch
+  configure-ntp-server.sh"), or chrony rejecting the new config (the tool
+  restores its backup and says so). Fix the cause and re-run.
+- **Run exited with code 3** - not a failure: everything else completed, but
+  the NTP step was skipped after an error and is listed under "FLAGGED FOR
+  REVIEW" in the final summary. Check `audit.log`, then re-run.
+- **"No active time synchronization daemon was detected"** - setup found no
+  running chrony, `systemd-timesyncd`, or ntpd. Re-run and answer yes to the
+  time server question, or pass `--ntp-sources`.
 - **Group/ACL step fails** - see `Group-MGMT/README.md`'s
   Troubleshooting section; the same `create-usr_admin-group.sh` runs
   underneath this step.

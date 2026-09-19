@@ -1,4 +1,4 @@
-README.md v1.3.0 (Last Rev: 2026-09-18)
+README.md v1.3.1 (Last Rev: 2026-09-19)
 
 ## Overview
 
@@ -21,8 +21,8 @@ self-contained tool with its own README.
   so a host can send alert emails, independent of any other tool. See
   `Notifications/README.md`.
 - **Server-Setup/** - baseline provisioning for a freshly installed
-  server (packages, timezone, Cockpit, unattended updates, usr_admin
-  permissions). See `Server-Setup/README.md`.
+  server (packages, timezone, time synchronization via NTP-Config, Cockpit,
+  unattended updates, usr_admin permissions). See `Server-Setup/README.md`.
 - **Updates/** - automated OS patching with email alerting, deployed as a
   cron job. See `Updates/README.md`.
 

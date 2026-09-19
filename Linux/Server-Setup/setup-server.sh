@@ -2,9 +2,30 @@
 #
 # setup-server.sh
 # 2026-09-19
-# Version: v1.3.0
+# Version: v1.4.0
 #
 # CHANGELOG:
+#   v1.4.0 - New "Time synchronization (NTP)" step after the timezone. It
+#            shows the current time server configuration, asks whether it
+#            needs to change (default: no), and if so hands off to
+#            Linux/NTP-Config/configure-ntp-server.sh, the same way the
+#            usr_admin step hands off to Group-MGMT: the sibling copy when
+#            present, else a copy fetched from the NTP-Config "stable"
+#            channel. Nothing is installed on the host by this step.
+#            Unattended runs (--yes, or no terminal) only show the
+#            configuration unless --ntp-sources, --ntp-allow, or
+#            --ntp-stratum are given, which are passed through to the
+#            tool's own unattended interface; --skip-ntp skips the step.
+#            If the step fails, the error is shown, a record (when, on
+#            which host, who ran it, what failed, the exit code, and the
+#            tail of the run log) is appended to
+#            /var/log/server-setup/audit.log, and the operator chooses to
+#            exit or to skip NTP and continue. Unattended runs skip. A
+#            skipped NTP step is flagged in the final summary, and the run
+#            then exits 3 ("completed, items flagged for review") instead
+#            of 0. Depends on configure-ntp-server.sh v1.7.0 or later for
+#            the interactive menu to offer to apply pending changes on
+#            exit.
 #   v1.3.0 - After switching netplan to the NetworkManager renderer, also
 #            install Ubuntu's dracut "no-network" profile into
 #            /etc/dracut.conf.d and rebuild the initramfs (dracut hosts
@@ -70,8 +91,9 @@
 #
 # PURPOSE:
 # Baseline provisioning for a freshly installed Linux server: base
-# packages, timezone, Cockpit, NetworkManager as the netplan renderer
-# (where applicable), unattended OS updates, and the usr_admin
+# packages, timezone, time synchronization (via NTP-Config/
+# configure-ntp-server.sh), Cockpit, NetworkManager as the netplan
+# renderer (where applicable), unattended OS updates, and the usr_admin
 # permissions group on /opt (via Group-MGMT/create-usr_admin-group.sh).
 # Detects the host distro and adapts package names/mechanisms
 # accordingly. Supports Debian/Ubuntu, Fedora, and RHEL-family distros
@@ -79,7 +101,15 @@
 #
 # USAGE:
 #   setup-server.sh --admin-user NAME [--timezone TZ] [--yes]
+#                   [--skip-ntp | [--ntp-sources V] [--ntp-allow CIDRS]
+#                                 [--ntp-stratum N]]
 #   setup-server.sh --check                Dependency/pre-flight checks only
+#
+# EXIT CODES:
+#   0  success
+#   1  failure, or the operator chose to exit after an NTP error
+#   3  completed, but one or more items are flagged for review (see the
+#      final summary and /var/log/server-setup/audit.log)
 #
 # CONFIG:
 #   No config file - everything is a flag or an interactive prompt.
@@ -107,17 +137,39 @@ timeout() { command timeout --foreground "$@"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GROUP_MGMT_LOCAL="${SCRIPT_DIR}/../Group-MGMT/create-usr_admin-group.sh"
 GROUP_MGMT_URL="https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Group-MGMT/create-usr_admin-group.sh"
+NTP_LOCAL="${SCRIPT_DIR}/../NTP-Config/configure-ntp-server.sh"
+NTP_URL="https://raw.githubusercontent.com/MVTS-Corp/Scripts/stable/Linux/NTP-Config/configure-ntp-server.sh"
 LOG_DIR="/var/log/server-setup"
+AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
+SCRIPT_VERSION="v1.4.0"
 
 ADMIN_USER=""
 TIMEZONE="America/New_York"
 ASSUME_YES=0
 CHECK_ONLY=0
+SKIP_NTP=0
+NTP_SOURCES=""
+NTP_ALLOW=""
+NTP_STRATUM=""
+NTP_SOURCES_SET=0
+NTP_ALLOW_SET=0
+NTP_STRATUM_SET=0
+
+# Outcome of the NTP step for the final summary, and anything that needs a
+# human to look at it afterward (which also makes the run exit 3).
+NTP_OUTCOME="not run"
+FLAGGED_ITEMS=()
+NTP_TOOL=""
+NTP_TOOL_SRC=""
+NTP_TOOL_VERSION=""
+NTP_TMP=""
+NTP_ERR=""
 
 usage() {
     cat <<EOF
 Usage: sudo ${0##*/} --admin-user NAME [--timezone TZ] [--yes]
+                     [--skip-ntp | --ntp-sources V --ntp-allow CIDRS --ntp-stratum N]
        sudo ${0##*/} --check
 
   --admin-user NAME  Existing local username to add (alongside root) to
@@ -131,13 +183,27 @@ Usage: sudo ${0##*/} --admin-user NAME [--timezone TZ] [--yes]
                      of provisioning.
   --timezone TZ      IANA timezone name (default: America/New_York).
   --yes              Skip all confirmation prompts, including usr_admin
-                     creation if it doesn't already exist.
+                     creation if it doesn't already exist. The time
+                     synchronization step then only shows the current
+                     configuration, unless --ntp-* settings are given.
+  --skip-ntp         Skip the time synchronization (NTP) step entirely.
+  --ntp-sources V    Set the time sources unattended: native, usa,
+                     preferred, or a comma separated list of hostnames/IPs.
+  --ntp-allow CIDRS  Set the subnets allowed to query this host for time
+                     (comma separated), or "none". Repeatable.
+  --ntp-stratum N    Set the local stratum lock (0-15), or "none".
+                     The three --ntp-* options are passed to
+                     NTP-Config/configure-ntp-server.sh (see its README).
   --check            Dependency and pre-flight checks only, no changes.
   -h, --help         Show this help text.
+
+Exit codes: 0 success, 1 failure, 3 completed with items flagged for
+review (for example NTP skipped after an error).
 
 Examples:
   sudo ./${0##*/} --admin-user jsmith
   sudo ./${0##*/} --admin-user jsmith --timezone America/Chicago --yes
+  sudo ./${0##*/} --admin-user jsmith --yes --ntp-sources preferred --ntp-allow 192.168.1.0/24
 EOF
 }
 
@@ -153,6 +219,17 @@ while [[ $# -gt 0 ]]; do
             ASSUME_YES=1; shift ;;
         --check)
             CHECK_ONLY=1; shift ;;
+        --skip-ntp)
+            SKIP_NTP=1; shift ;;
+        --ntp-sources)
+            [[ $# -ge 2 ]] || { echo "ERROR: --ntp-sources requires a value." >&2; exit 1; }
+            NTP_SOURCES="$2"; NTP_SOURCES_SET=1; shift 2 ;;
+        --ntp-allow)
+            [[ $# -ge 2 ]] || { echo "ERROR: --ntp-allow requires a value." >&2; exit 1; }
+            NTP_ALLOW="${NTP_ALLOW:+${NTP_ALLOW},}$2"; NTP_ALLOW_SET=1; shift 2 ;;
+        --ntp-stratum)
+            [[ $# -ge 2 ]] || { echo "ERROR: --ntp-stratum requires a value." >&2; exit 1; }
+            NTP_STRATUM="$2"; NTP_STRATUM_SET=1; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -161,6 +238,26 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+NTP_HAS_SETTINGS=$(( NTP_SOURCES_SET || NTP_ALLOW_SET || NTP_STRATUM_SET ))
+if (( SKIP_NTP && NTP_HAS_SETTINGS )); then
+    echo "ERROR: --skip-ntp cannot be combined with --ntp-sources, --ntp-allow, or --ntp-stratum." >&2
+    exit 1
+fi
+if (( NTP_STRATUM_SET )) && [[ ! "$NTP_STRATUM" =~ ^([0-9]|1[0-5]|none)$ ]]; then
+    echo "ERROR: --ntp-stratum must be a whole number from 0 to 15, or \"none\"." >&2
+    exit 1
+fi
+# An empty value (usually an unset variable in the caller) must not silently
+# mean "no setting", or the run would fall through to the interactive path.
+if (( NTP_SOURCES_SET )) && [[ -z "${NTP_SOURCES//[[:space:],]/}" ]]; then
+    echo "ERROR: --ntp-sources needs a value: native, usa, preferred, or a list of hostnames/IPs." >&2
+    exit 1
+fi
+if (( NTP_ALLOW_SET )) && [[ -z "${NTP_ALLOW//[[:space:],]/}" ]]; then
+    echo "ERROR: --ntp-allow needs a value: one or more CIDRs, or \"none\"." >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Logging + fail-loud
@@ -243,6 +340,13 @@ if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
     echo "About to provision this host ($DISTRO_NAME) as a baseline MVTS server:"
     echo "  - Install net-tools, dnsutils/bind-utils, NetworkManager, acl, unzip"
     echo "  - Set timezone to ${TIMEZONE}"
+    if (( SKIP_NTP )); then
+        echo "  - Skip time synchronization (NTP) configuration (--skip-ntp)"
+    elif (( NTP_HAS_SETTINGS )); then
+        echo "  - Configure time synchronization (NTP) with the settings given on the command line"
+    else
+        echo "  - Show the current time server configuration and ask whether to change it"
+    fi
     echo "  - Install and enable Cockpit"
     echo "  - Set netplan's renderer to NetworkManager, if netplan is in use (not applied live)"
     echo "    and, on dracut hosts, keep networking out of the initramfs (rebuilds it; next boot)"
@@ -284,6 +388,234 @@ set_timezone() {
     actual="$(timedatectl show --property=Timezone --value)"
     [[ "$actual" == "$TIMEZONE" ]] || die "Timezone set to ${TIMEZONE} but timedatectl now reports ${actual}."
     log_info "Timezone set to ${TIMEZONE}."
+}
+
+# ---------------------------------------------------------------------------
+# 2a. Time synchronization (NTP) - delegates to NTP-Config's
+#     configure-ntp-server.sh, the same way the usr_admin step delegates to
+#     Group-MGMT: the sibling copy when present, else a copy fetched from the
+#     NTP-Config "stable" channel. The tool is run from where it is found and
+#     never installed on the host by this script.
+#
+#     Any failure here is shown to the operator, recorded in audit.log, and
+#     then the operator decides: exit, or skip NTP and continue with the
+#     step flagged for review in the final summary (and exit code 3).
+#     Unattended runs have nobody to ask and always skip.
+# ---------------------------------------------------------------------------
+
+# True when a person can be asked a question (same test the other prompts use).
+is_interactive() { [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; }
+
+# Sets NTP_TOOL / NTP_TOOL_SRC / NTP_TOOL_VERSION, or NTP_ERR and returns 1.
+# Does not die: the caller decides whether a missing tool is an error (the
+# operator asked to change the configuration) or just a degraded display.
+resolve_ntp_tool() {
+    [[ -z "$NTP_TOOL" ]] || return 0
+    NTP_ERR=""
+
+    if [[ -f "$NTP_LOCAL" ]]; then
+        NTP_TOOL="$NTP_LOCAL"
+        NTP_TOOL_SRC="local copy, ${NTP_LOCAL}"
+    else
+        log_info "Local NTP-Config script not found (standalone run); fetching from ${NTP_URL}..."
+        NTP_TMP="$(mktemp)" || { NTP_ERR="mktemp failed; cannot stage the NTP-Config script."; return 1; }
+        if ! timeout 30 curl --connect-timeout 10 -fsSL "$NTP_URL" -o "$NTP_TMP"; then
+            NTP_ERR="Failed to fetch configure-ntp-server.sh from ${NTP_URL}."
+        # A captive portal or proxy error page can come back as HTTP 200.
+        elif [[ "$(sed -n '1p' "$NTP_TMP")" != "#!/usr/bin/env bash" ]] || ! bash -n "$NTP_TMP"; then
+            NTP_ERR="The file fetched from ${NTP_URL} is not a valid bash script."
+        fi
+        if [[ -n "$NTP_ERR" ]]; then
+            rm -f "$NTP_TMP"; NTP_TMP=""
+            return 1
+        fi
+        NTP_TOOL="$NTP_TMP"
+        NTP_TOOL_SRC="fetched from the NTP-Config stable channel"
+    fi
+
+    NTP_TOOL_VERSION="$(sed -n 's/^SCRIPT_VERSION="\(v[0-9][0-9.]*\)"$/\1/p' "$NTP_TOOL" | sed -n '1p')"
+    NTP_TOOL_VERSION="${NTP_TOOL_VERSION:-unknown}"
+    log_info "Using NTP-Config configure-ntp-server.sh ${NTP_TOOL_VERSION} (${NTP_TOOL_SRC})."
+    return 0
+}
+
+ntp_cleanup() {
+    [[ -z "$NTP_TMP" ]] || rm -f "$NTP_TMP"
+    NTP_TMP=""
+}
+
+active_time_daemon() {
+    local svc
+    for svc in chrony chronyd systemd-timesyncd ntpd ntp ntpsec ntpd-rs; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            echo "$svc"
+            return 0
+        fi
+    done
+    echo "none detected"
+}
+
+show_time_sync_status() {
+    local sync
+    sync="$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || true)"
+    echo
+    echo "  Active time daemon:  $(active_time_daemon)"
+    echo "  Clock synchronized:  ${sync:-unknown}"
+
+    if command -v chronyd >/dev/null 2>&1; then
+        if resolve_ntp_tool; then
+            # Read-only. A failure here is not a configuration failure (nothing
+            # has been attempted yet), so it is a warning, not an audit item.
+            timeout 60 bash "$NTP_TOOL" --status \
+                || log_warn "The NTP-Config status report failed (see above); continuing."
+        else
+            log_warn "${NTP_ERR} Showing basic chrony output instead."
+            timeout 15 chronyc sources 2>/dev/null || true
+        fi
+    else
+        echo "  chrony is not installed on this host."
+        timedatectl show-timesync --property=SystemNTPServers --property=FallbackNTPServers \
+            --property=ServerName 2>/dev/null | sed 's/^/  /' || true
+    fi
+    echo
+}
+
+# audit_record <decision> <what> <exit code> <detail>
+# Appends one block to AUDIT_LOG: when, on which host, who ran it, what
+# failed, and the tail of this run's log (which already holds the tool's
+# output). Never fails the caller; an unwritable audit log is a warning.
+audit_record() {
+    local decision="$1" what="$2" rc="$3" detail="$4"
+    {
+        echo "==== $(date '+%Y-%m-%d %H:%M:%S %z') ===="
+        echo "event:        NTP step failed"
+        echo "status:       ${decision}"
+        echo "host:         $(hostname -f 2>/dev/null || hostname) (${DISTRO_NAME})"
+        echo "run by:       ${SUDO_USER:-$(id -un)} (login: $(logname 2>/dev/null || echo unknown)); admin user: ${ADMIN_USER}"
+        echo "script:       ${0##*/} ${SCRIPT_VERSION}"
+        echo "step:         Time synchronization (NTP)"
+        echo "what failed:  ${what}"
+        echo "exit code:    ${rc}"
+        echo "detail:       ${detail}"
+        echo "ntp tool:     ${NTP_TOOL_VERSION:-not loaded} (${NTP_TOOL_SRC:-not loaded})"
+        echo "run log:      ${SETUP_LOG}"
+        echo "---- last 20 lines of the run log ----"
+        sleep 0.3   # the run log is written through tee; let it catch up
+        tail -n 20 "$SETUP_LOG" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+        echo "==== end ===="
+        echo
+    } >> "$AUDIT_LOG" 2>/dev/null \
+        && chmod 640 "$AUDIT_LOG" 2>/dev/null \
+        && log_info "Recorded in ${AUDIT_LOG}." \
+        || log_warn "Could not write the audit record to ${AUDIT_LOG}."
+}
+
+# ntp_failed <what> <exit code> <detail>
+# Returns 0 if the operator (or an unattended run) chose to skip NTP and
+# continue; exits the script if the operator chose to exit.
+ntp_failed() {
+    local what="$1" rc="$2" detail="$3" choice="" decision
+    echo
+    log_error "NTP configuration failed: ${what}"
+    log_error "  exit code ${rc}: ${detail}"
+
+    if is_interactive; then
+        while :; do
+            choice="$(ask "Exit setup now (E), or skip NTP configuration and continue (S)?")"
+            case "$choice" in
+                [Ee]|[Ee]xit) decision="operator chose to exit"; break ;;
+                [Ss]|[Ss]kip) decision="skipped, flagged for review"; break ;;
+                *) echo "Please answer E or S." ;;
+            esac
+        done
+    else
+        decision="skipped automatically (no operator to ask), flagged for review"
+        log_warn "No terminal to ask on; skipping NTP and continuing."
+    fi
+
+    audit_record "$decision" "$what" "$rc" "$detail"
+    ntp_cleanup
+
+    if [[ "$decision" == "operator chose to exit" ]]; then
+        log_error "Exiting at the operator's request. Time synchronization was not configured; nothing after this step was run."
+        exit 1
+    fi
+    NTP_OUTCOME="SKIPPED AFTER ERROR - flagged for review"
+    FLAGGED_ITEMS+=("Time synchronization (NTP): ${what} (exit code ${rc}). Skipped; see ${AUDIT_LOG}.")
+    log_warn "Skipping NTP configuration. It is flagged for review in the final summary."
+    return 0
+}
+
+configure_ntp() {
+    log_info "== Time synchronization (NTP) =="
+
+    if (( SKIP_NTP )); then
+        log_info "Skipped (--skip-ntp)."
+        NTP_OUTCOME="skipped (--skip-ntp)"
+        return 0
+    fi
+
+    log_info "Current time server configuration:"
+    show_time_sync_status
+
+    local rc=0 args=() out
+
+    if (( NTP_HAS_SETTINGS )); then
+        # Settings on the command line are the answers: pass them to the
+        # tool's own unattended interface, which validates before touching
+        # anything and reports "RESULT: changed" or "RESULT: unchanged".
+        (( NTP_SOURCES_SET )) && args+=(--sources "$NTP_SOURCES")
+        (( NTP_ALLOW_SET )) && args+=(--allow "$NTP_ALLOW")
+        (( NTP_STRATUM_SET )) && args+=(--stratum "$NTP_STRATUM")
+        if ! resolve_ntp_tool; then
+            ntp_failed "could not load the NTP-Config script" 1 "$NTP_ERR"
+            return 0
+        fi
+        log_info "Applying the NTP settings given on the command line..."
+        out="$(timeout 600 bash "$NTP_TOOL" "${args[@]}" </dev/null 2>&1)" || rc=$?
+        printf '%s\n' "$out"
+        if (( rc != 0 )); then
+            local why="configure-ntp-server.sh exited non-zero (see the output above)."
+            (( rc == 2 )) && why="configure-ntp-server.sh rejected the --ntp-* arguments as invalid; nothing was changed."
+            ntp_failed "configure-ntp-server.sh ${args[*]}" "$rc" "$why"
+            return 0
+        fi
+        NTP_OUTCOME="configured from command-line settings ($(tail -n1 <<<"$out" | sed 's/^RESULT: //'))"
+        ntp_cleanup
+        return 0
+    fi
+
+    if ! is_interactive; then
+        log_info "No terminal to ask on and no --ntp-* settings given; leaving the time configuration as it is."
+        NTP_OUTCOME="unchanged (unattended, no --ntp-* settings)"
+        ntp_cleanup
+        return 0
+    fi
+
+    if ! confirm "Do you need to change the time server configuration?" "n"; then
+        log_info "Leaving the time configuration as it is."
+        NTP_OUTCOME="unchanged (operator declined)"
+        ntp_cleanup
+        return 0
+    fi
+
+    if ! resolve_ntp_tool; then
+        ntp_failed "could not load the NTP-Config script" 1 "$NTP_ERR"
+        return 0
+    fi
+
+    log_info "Starting the NTP-Config menu. When you are done, choose 7 (Exit); it will offer to apply any changes that are still pending."
+    wait_for_tty_foreground
+    # No timeout: an operator is driving this menu.
+    bash "$NTP_TOOL" --no-update || rc=$?
+    if (( rc != 0 )); then
+        ntp_failed "configure-ntp-server.sh interactive session" "$rc" "configure-ntp-server.sh exited non-zero (see the output above; the tool restores its last backup if chrony would not start)."
+        return 0
+    fi
+
+    NTP_OUTCOME="configured with configure-ntp-server.sh ${NTP_TOOL_VERSION} (${NTP_TOOL_SRC})"
+    log_info "NTP-Config was run from a temporary or repo copy and is not installed on this host. To keep it installed with self-updates, see Linux/NTP-Config/README.md (Quick Start)."
+    ntp_cleanup
 }
 
 # ---------------------------------------------------------------------------
@@ -525,6 +857,7 @@ setup_usr_admin_group() {
 # ---------------------------------------------------------------------------
 install_base_packages
 set_timezone
+configure_ntp
 install_cockpit
 configure_netplan_renderer
 configure_unattended_updates
@@ -535,8 +868,14 @@ setup_usr_admin_group
 find "$LOG_DIR" -name 'setup-*.log' -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
 
 echo
-log_info "Server setup complete."
+if (( ${#FLAGGED_ITEMS[@]} )); then
+    log_warn "Server setup complete, with ${#FLAGGED_ITEMS[@]} item(s) flagged for review."
+else
+    log_info "Server setup complete."
+fi
 echo "  Timezone:    $(timedatectl show --property=Timezone --value)"
+echo "  Time sync:   ${NTP_OUTCOME}"
+echo "  Time daemon: $(active_time_daemon), clock synchronized: $(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo unknown)"
 echo "  Cockpit:     https://$(hostname -f 2>/dev/null || hostname):9090"
 if (( USR_ADMIN_CONFIGURED )); then
     echo "  usr_admin:   root, ${ADMIN_USER}  (GID 3000, rwX on /opt, read access on $LOG_DIR)"
@@ -550,5 +889,19 @@ if command -v netplan >/dev/null 2>&1; then
         echo "  netplan:     renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
     fi
 fi
+if [[ "$(active_time_daemon)" == "none detected" ]]; then
+    echo
+    log_warn "No active time synchronization daemon was detected on this host. Re-run this script and answer yes to the time server question, or pass --ntp-sources."
+fi
 echo
 echo "Re-run this script any time; every step is safe to repeat."
+
+if (( ${#FLAGGED_ITEMS[@]} )); then
+    echo
+    log_warn "FLAGGED FOR REVIEW:"
+    for _item in "${FLAGGED_ITEMS[@]}"; do
+        log_warn "  - ${_item}"
+    done
+    log_warn "Exiting with code 3 (completed, items flagged for review)."
+    exit 3
+fi
