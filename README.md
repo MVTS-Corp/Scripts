@@ -1,4 +1,4 @@
-README.md v1.1.0 (Last Rev: 2026-09-18)
+README.md v1.1.1 (Last Rev: 2026-09-19)
 
 # Scripts
 
@@ -75,6 +75,17 @@ higher release (a revert is fine), never by going back. To put one machine
 back on an older release right away, re-run its installer with `--ref` (Linux)
 or `-Ref` (Windows) set to the older tag.
 
-Recommended GitHub settings: protect `stable` (block force pushes and
-deletion) and protect the `ntp-config-v*` tag pattern (block updates and
-deletion), and require 2FA for everyone with write access.
+These protections are configured on GitHub as repository rulesets, with no
+bypass exceptions:
+
+- **Protect stable release channel** - `stable` cannot be deleted or
+  force-pushed. Fast-forwarding it to a newly tagged commit still works.
+- **Protect NTP-Config release tags** - tags matching `ntp-config-v*`
+  cannot be deleted or moved. Creating a new tag still works.
+- Two-factor authentication is required for every member of the
+  organization.
+
+A tool with a new tag prefix needs that prefix added to the tag ruleset
+(repository Settings, Rules, Rulesets) to be protected the same way. To
+change a protected ref in an emergency, disable its ruleset first and
+re-enable it straight afterward. `main` is deliberately not protected.
