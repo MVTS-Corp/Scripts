@@ -1,4 +1,4 @@
-README.md v1.2.0 (Last Rev: 2026-08-09)
+README.md v1.3.0 (Last Rev: 2026-09-18)
 
 ## Overview
 
@@ -13,6 +13,10 @@ self-contained tool with its own README.
   MVTS Linux fleet. See `Group-MGMT/README.md`.
 - **MVTS/** - installs the MVTS brand fonts system-wide. See
   `MVTS/README.md`.
+- **NTP-Config/** - interactive tool to configure a host as a chrony-based
+  NTP server (upstream sources, allowed subnets with matching firewall
+  rules, stratum lock). Installs and updates itself from GitHub. See
+  `NTP-Config/README.md`.
 - **Notifications/** - installs and configures an SMTP relay (via `msmtp`)
   so a host can send alert emails, independent of any other tool. See
   `Notifications/README.md`.

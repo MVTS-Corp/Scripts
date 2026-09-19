@@ -1,4 +1,4 @@
-README.md v1.0.0 (Last Rev: 2026-08-09)
+README.md v1.1.0 (Last Rev: 2026-09-18)
 
 ## Overview
 
@@ -12,6 +12,10 @@ subfolder is a self-contained tool with its own README.
   Desktop, VS Code, Notepad++). See `Development-Tools/README.md`.
 - **MVTS/** - installs the MVTS brand fonts system-wide. See
   `MVTS/README.md`.
+- **NTP-Config/** - interactive tool to configure Windows time sync (w32time)
+  on standalone machines, domain members, domain controllers, and Hyper-V
+  hosts, aware of domain roles and Group Policy. Installs and updates itself
+  from GitHub. See `NTP-Config/README.md`.
 - **Server/** - placeholder for Windows Server specific scripts; empty for
   now. See `Server/README.md`.
 

@@ -1,4 +1,4 @@
-README.md v1.0.0 (Last Rev: 2026-08-09)
+README.md v1.1.0 (Last Rev: 2026-09-18)
 
 # Scripts
 
@@ -29,3 +29,52 @@ git clone https://github.com/MVTS-Corp/Scripts.git
 Most individual tools are also independently installable with a single
 curl (Linux) or irm (Windows) one-liner without cloning anything - see
 that tool's own README for the exact command.
+
+## Releases and Channels
+
+Most tools here run straight from `main`. Tools that update themselves on
+machines nobody is watching (currently **NTP-Config**) follow a release
+channel instead, so a half-finished commit on `main` can never reach them.
+
+- **`main`** - where work happens. Never followed by a self-updating tool.
+- **`stable`** - a branch that only ever moves forward to a commit that has
+  been tagged as a release. This is what installed tools follow by default.
+- **`<tool>-vX.Y.Z` tags** (for example `ntp-config-v1.0.0`) - permanent
+  markers for exactly what shipped, and the way to pin a machine to one
+  release. A tag applies to the whole repository, so the tool name is part of
+  the tag, and the number is that tool's *release* number: MAJOR for a change
+  that breaks callers (flags, exit codes, install paths), MINOR for a new
+  feature, PATCH for a fix. It is separate from the version inside each
+  script's header, which changes on every edit.
+
+Releases so far:
+
+| Tag | Linux scripts | Windows scripts |
+| --- | --- | --- |
+| `ntp-config-v1.0.0` | configure-ntp-server.sh v1.6.0, install.sh v2.2.0, bootstrap.sh v1.1.0 | Configure-NtpConfig.ps1 v1.6.0, Install-NtpConfig.ps1 v2.2.0, runme.cmd v1.1.0 |
+
+### Cutting a Release
+
+From a clean checkout of `main` with the work already committed and pushed:
+
+```bash
+git switch main && git pull --ff-only
+git tag -a ntp-config-v1.1.0 -m "Short summary of what users will notice"
+git push origin ntp-config-v1.1.0
+git push origin main:stable
+```
+
+Order matters: the commit is pushed first, then tagged, then `stable` is moved
+to that same commit. `git push origin main:stable` is a plain fast-forward and
+is rejected if it would move `stable` backwards. Installed machines pick the
+release up the next time they run.
+
+Do not rewind `stable` or move a tag. The tools refuse to install an older
+version than the one running, so a bad release is fixed by publishing a new,
+higher release (a revert is fine), never by going back. To put one machine
+back on an older release right away, re-run its installer with `--ref` (Linux)
+or `-Ref` (Windows) set to the older tag.
+
+Recommended GitHub settings: protect `stable` (block force pushes and
+deletion) and protect the `ntp-config-v*` tag pattern (block updates and
+deletion), and require 2FA for everyone with write access.
