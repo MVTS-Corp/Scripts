@@ -1,4 +1,4 @@
-README.md v1.4.0 (Last Rev: 2026-09-19)
+README.md v1.4.1 (Last Rev: 2026-09-19)
 
 # Server-Setup
 
@@ -49,6 +49,13 @@ AlmaLinux) also detected and supported.
 Every step is idempotent - safe to re-run against a host that's already
 been set up, whether to pick up a change or just to confirm nothing
 drifted.
+
+In an interactive run, it first prints a numbered plan of the steps in the
+order they will run, tailored to the host (packages for its distro family,
+what the time step will do given any `--ntp-*` flags, whether a firewall
+port will be opened, whether netplan/dracut apply, whether `usr_admin`
+already exists), and asks "Proceed?" before changing anything. `--yes`
+skips the plan and the prompt.
 
 Exit codes: `0` success, `1` failure (or you chose to exit after an NTP
 error), `3` completed but one or more items are flagged for review (see

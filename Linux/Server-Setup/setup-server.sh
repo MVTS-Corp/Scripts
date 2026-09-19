@@ -2,9 +2,18 @@
 #
 # setup-server.sh
 # 2026-09-19
-# Version: v1.4.0
+# Version: v1.4.1
 #
 # CHANGELOG:
+#   v1.4.1 - The dialog shown before "Proceed?" is now a numbered plan in
+#            run order, tailored to the host: each step says what it will
+#            change here (packages for this distro family, the NTP path
+#            implied by the flags and what the host uses today, whether a
+#            host firewall port gets opened, whether netplan/dracut apply,
+#            whether usr_admin already exists), and that nothing reboots
+#            the host or applies a network change live. Previously it was a
+#            short generic bullet list that did not say what the time
+#            synchronization step would do.
 #   v1.4.0 - New "Time synchronization (NTP)" step after the timezone. It
 #            shows the current time server configuration, asks whether it
 #            needs to change (default: no), and if so hands off to
@@ -142,7 +151,7 @@ NTP_URL="https://raw.githubusercontent.com/MVTS-Corp/Scripts/stable/Linux/NTP-Co
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.4.0"
+SCRIPT_VERSION="v1.4.1"
 
 ADMIN_USER=""
 TIMEZONE="America/New_York"
@@ -335,26 +344,93 @@ if (( CHECK_ONLY )); then
     exit 0
 fi
 
-if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
-    echo
-    echo "About to provision this host ($DISTRO_NAME) as a baseline MVTS server:"
-    echo "  - Install net-tools, dnsutils/bind-utils, NetworkManager, acl, unzip"
-    echo "  - Set timezone to ${TIMEZONE}"
-    if (( SKIP_NTP )); then
-        echo "  - Skip time synchronization (NTP) configuration (--skip-ntp)"
-    elif (( NTP_HAS_SETTINGS )); then
-        echo "  - Configure time synchronization (NTP) with the settings given on the command line"
+# Prints the numbered plan shown before the "Proceed?" prompt: every step in
+# the order it runs, and what it will change on THIS host (distro family,
+# netplan/dracut/firewall presence, whether usr_admin exists, and any NTP
+# flags), so the operator is agreeing to what will actually happen and not to
+# a generic list. Detection here mirrors the checks the steps themselves make.
+plan_step() {   # plan_step N "Title" "what it does"
+    printf '  %s. %s\n' "$1" "$2"
+    printf '%s\n' "$3" | fold -s -w 68 | sed 's/[[:space:]]*$//; s/^/       /'
+}
+
+print_provisioning_plan() {
+    local pkgs updates ntp cockpit_fw netplan_txt usr_admin_txt
+    local netplan_files=(/etc/netplan/*.yaml)
+
+    if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        pkgs="net-tools, dnsutils, network-manager, acl, unzip"
+        updates="Install and enable unattended-upgrades (with apt-listchanges) so security and OS updates apply automatically."
     else
-        echo "  - Show the current time server configuration and ask whether to change it"
+        pkgs="net-tools, bind-utils, NetworkManager, acl, unzip"
+        updates="Install and enable dnf-automatic with apply_updates = yes so OS updates apply automatically."
     fi
-    echo "  - Install and enable Cockpit"
-    echo "  - Set netplan's renderer to NetworkManager, if netplan is in use (not applied live)"
-    echo "    and, on dracut hosts, keep networking out of the initramfs (rebuilds it; next boot)"
-    echo "  - Enable unattended OS updates"
-    echo "  - Create the usr_admin group (GID 3000) if it doesn't already exist - you'll be asked"
-    echo "    to confirm that specific step - and add root + ${ADMIN_USER}, with rwX ACLs on /opt"
-    echo "    and read access to this run's log"
+
+    if (( SKIP_NTP )); then
+        ntp="Skipped (--skip-ntp). The time configuration is left exactly as it is."
+    elif (( NTP_HAS_SETTINGS )); then
+        ntp="Configure time synchronization (chrony) from the command line:"
+        (( NTP_SOURCES_SET )) && ntp+=" sources = ${NTP_SOURCES};"
+        (( NTP_ALLOW_SET )) && ntp+=" allowed subnets = ${NTP_ALLOW};"
+        (( NTP_STRATUM_SET )) && ntp+=" stratum lock = ${NTP_STRATUM};"
+        ntp="${ntp%;}. Installs chrony if it is missing, via NTP-Config."
+    else
+        ntp="Show the current time server configuration, then ask whether it needs to change (default: no). If you answer yes, NTP-Config's menu opens: it installs chrony if it is missing, and lets you set the time sources, the subnets allowed to query this host, and a stratum lock."
+        if systemctl is-active --quiet systemd-timesyncd 2>/dev/null && ! command -v chronyd >/dev/null 2>&1; then
+            ntp+=" Installing chrony replaces systemd-timesyncd, which is what this host uses now."
+        fi
+        ntp+=" If you answer no, nothing about time is changed."
+    fi
+
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+        cockpit_fw="Opens TCP 9090 in firewalld."
+    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        cockpit_fw="Opens TCP 9090 in ufw."
+    else
+        cockpit_fw="No active host firewall (firewalld/ufw) was detected, so no port is opened."
+    fi
+
+    if command -v netplan >/dev/null 2>&1 && [[ -e "${netplan_files[0]}" ]]; then
+        netplan_txt="Set the netplan renderer to NetworkManager in /etc/netplan (a timestamped backup of each edited file is kept). It is validated but NOT applied live; it takes effect on 'sudo netplan apply' or the next reboot."
+        if command -v dracut >/dev/null 2>&1 && command -v update-initramfs >/dev/null 2>&1; then
+            netplan_txt+=" This host builds its initramfs with dracut, so networking is also kept out of the initramfs so the static address is used at boot; that rebuilds the initramfs now and applies from the next boot."
+        fi
+    else
+        netplan_txt="Not applicable: netplan is not in use on this host, so nothing is changed."
+    fi
+
+    local members="root and ${ADMIN_USER}" member_verb="are members"
+    if [[ "$ADMIN_USER" == "root" ]]; then
+        members="root"
+        member_verb="is a member"
+    fi
+
+    if getent group usr_admin >/dev/null 2>&1; then
+        usr_admin_txt="The usr_admin group already exists. Make sure ${members} ${member_verb}, and (re)apply its read/write/execute ACLs on /opt (recursive, plus a default ACL so new files inherit it) and read access to the logs in ${LOG_DIR}."
+    else
+        usr_admin_txt="Create the usr_admin group (GID 3000); you will be asked to confirm this step separately, and declining skips only this step. Add ${members} to it, give it read/write/execute ACLs on /opt (recursive, plus a default ACL so new files inherit it) and read access to the logs in ${LOG_DIR}."
+    fi
+
     echo
+    echo "About to provision this host (${DISTRO_NAME}) as a baseline MVTS server."
+    echo "The steps below run in this order:"
+    echo
+    plan_step 1 "Base packages" "Install ${pkgs}."
+    plan_step 2 "Timezone" "Set the system timezone to ${TIMEZONE}."
+    plan_step 3 "Time synchronization (NTP)" "$ntp"
+    plan_step 4 "Cockpit" "Install and enable Cockpit, the web management console (https://<host>:9090). ${cockpit_fw}"
+    plan_step 5 "Network renderer (netplan)" "$netplan_txt"
+    plan_step 6 "Unattended updates" "$updates"
+    plan_step 7 "usr_admin group and /opt permissions" "$usr_admin_txt"
+    echo
+    echo "The host is not rebooted and no network change is applied live."
+    echo "Every step is safe to re-run."
+    echo "Log for this run: ${SETUP_LOG}"
+    echo
+}
+
+if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
+    print_provisioning_plan
     confirm "Proceed?" "y" || { log_info "Aborted, no changes made."; exit 0; }
 fi
 
