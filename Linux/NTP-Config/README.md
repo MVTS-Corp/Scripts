@@ -1,4 +1,4 @@
-README.md v2.2.0 (Last Rev: 2026-09-18)
+README.md v2.3.0 (Last Rev: 2026-09-19)
 
 # Linux NTP Config
 
@@ -40,6 +40,11 @@ The Windows equivalent lives in [Windows/NTP-Config](../../Windows/NTP-Config/RE
   auto-create firewall rule(s) (for re-syncing by hand), set/update the
   local stratum lock, apply changes and restart chrony (auto-restores the
   last backup and retries if chrony fails to come up on the new config).
+  Options 2, 3, and 5 only edit the config file; option 6 is what restarts
+  chrony on it, and is labelled "(changes pending)" while the file is ahead
+  of the running daemon. Choosing Exit with changes pending offers to apply
+  them first (default yes), so an untested config is not left to fail at the
+  next restart or reboot.
   Run with `--no-update` (or set `SKIP_SELF_UPDATE=1`) to skip the
   self-update check for a single run, useful when testing an in-progress
   change to the script itself. It can also run unattended from the command
@@ -247,6 +252,13 @@ Non-fatal; the tool keeps working on the installed version. Check outbound
 HTTPS to `raw.githubusercontent.com` (for example
 `curl -I https://raw.githubusercontent.com`), or set `SKIP_SELF_UPDATE=1` on
 hosts that are intentionally offline.
+
+**A change did not take effect**
+Options 2, 3, and 5 only write the config file. The running chrony picks the
+change up when option 6 (apply changes and restart) runs, which Exit offers
+to do for you if you skipped it. If you answered no at that prompt, the new
+config is on disk but untested and not in effect; re-run the tool and choose
+option 6.
 
 **chronyd fails to start after a change**
 Option 6 (apply changes and restart) automatically restores the backup

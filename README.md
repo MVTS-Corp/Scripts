@@ -1,4 +1,4 @@
-README.md v1.1.1 (Last Rev: 2026-09-19)
+README.md v1.1.2 (Last Rev: 2026-09-19)
 
 # Scripts
 
@@ -52,6 +52,7 @@ Releases so far:
 | Tag | Linux scripts | Windows scripts |
 | --- | --- | --- |
 | `ntp-config-v1.0.0` | configure-ntp-server.sh v1.6.0, install.sh v2.2.0, bootstrap.sh v1.1.0 | Configure-NtpConfig.ps1 v1.6.0, Install-NtpConfig.ps1 v2.2.0, runme.cmd v1.1.0 |
+| `ntp-config-v1.1.0` | configure-ntp-server.sh v1.7.0, install.sh v2.2.0, bootstrap.sh v1.1.0 | unchanged from `ntp-config-v1.0.0` |
 
 ### Cutting a Release
 

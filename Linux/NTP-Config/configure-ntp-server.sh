@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # configure-ntp-server.sh
-# 2026-09-18
-# Version: v1.6.0
+# 2026-09-19
+# Version: v1.7.0
 #
 # PURPOSE:
 # Tool to view and configure a Linux host (Debian, Ubuntu, RHEL, or Fedora
@@ -55,6 +55,16 @@
 #   2  invalid arguments; nothing on the system was touched
 #
 # CHANGELOG:
+#   v1.7.0 - The interactive menu now tracks configuration changes that
+#            have been written to the chrony config but not applied. Menu
+#            options 2, 3, and 5 only edit the file; only option 6
+#            restarts chrony (and only option 6 restores the backup if
+#            chrony will not start), so choosing Exit after a change left
+#            the new config untested and not in effect, to fail at the
+#            next unrelated restart or reboot. Option 6 is now labelled
+#            "(changes pending)" while that is the case, and Exit (or the
+#            menu's input closing) offers to apply and restart first. The
+#            unattended path is unchanged: it already restarts on a change.
 #   v1.6.0 - Self-update follows the ref saved by install.sh (a branch or a
 #            tag) instead of a fixed branch. The default is the "stable"
 #            channel, which only ever points at a tagged release; a host
@@ -97,13 +107,18 @@ set -f
 # --------------------------------------------------------------------------
 # Globals
 # --------------------------------------------------------------------------
-SCRIPT_VERSION="v1.6.0"
+SCRIPT_VERSION="v1.7.0"
 SOURCES_TAG="NTP-SCRIPT-SOURCES"
 ALLOW_TAG="NTP-SCRIPT-ALLOW"
 STRATUM_TAG="NTP-SCRIPT-STRATUM"
 SKIP_SELF_UPDATE="${SKIP_SELF_UPDATE:-0}"
 LAST_BACKUP=""
 BACKUP_TAKEN=0
+# Set to 1 whenever the chrony config is about to be written (every write
+# path takes a backup first) and back to 0 once apply_and_restart has
+# brought chronyd up on it, so the menu can tell when the file on disk is
+# ahead of the running daemon.
+CONFIG_PENDING=0
 # Set to 1 by the firewall helpers when they actually add or remove a rule,
 # so an unattended run can report "changed" for firewall-only drift repairs.
 FW_CHANGED=0
@@ -526,6 +541,7 @@ backup_conf() {
     bak="${CHRONY_CONF}.bak.$(date +%Y%m%d%H%M%S)"
     cp -p "${CHRONY_CONF}" "${bak}"
     LAST_BACKUP="${bak}"
+    CONFIG_PENDING=1
     echo "Backup saved: ${bak}"
 }
 
@@ -968,6 +984,7 @@ apply_and_restart() {
     sleep 1
     if systemctl is-active --quiet "${CHRONY_SERVICE}"; then
         echo "${CHRONY_SERVICE} restarted successfully."
+        CONFIG_PENDING=0
         return 0
     fi
 
@@ -1184,10 +1201,49 @@ run_unattended() {
 }
 
 # --------------------------------------------------------------------------
+# Pending changes
+#
+# Menu options 2, 3, and 5 edit the chrony config but do not restart chronyd;
+# only apply_and_restart does, and only it can restore the backup if chronyd
+# will not start. Leaving the menu with the file ahead of the daemon would
+# leave an untested config to fail at the next restart or reboot, so the
+# ways out of the menu go through here first.
+#   ask  - offer to apply now (default yes); declining is allowed, with a
+#          warning of what that leaves behind.
+#   auto - the menu's input is gone, so there is nobody to ask: apply, since
+#          apply_and_restart is the only path that verifies the new config
+#          and reverts it if chronyd rejects it.
+# --------------------------------------------------------------------------
+resolve_pending_changes() {
+    local mode="$1" ans=""
+    (( CONFIG_PENDING == 1 )) || return 0
+
+    echo ""
+    echo "Configuration changes were written to ${CHRONY_CONF} but ${CHRONY_SERVICE} has not been restarted on them yet."
+    if [[ "${mode}" == "ask" ]]; then
+        read -rp "Apply now and restart ${CHRONY_SERVICE}? [Y/n]: " ans || ans=""
+        ans="${ans:-Y}"
+        if [[ ! "${ans}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+            echo "WARNING: not applied. ${CHRONY_SERVICE} is still running its previous configuration, and the new one has not been tested." >&2
+            echo "         If it is invalid, ${CHRONY_SERVICE} will fail to start at its next restart or reboot. Run this tool again and choose option 6 to apply it." >&2
+            return 0
+        fi
+    else
+        echo "Applying them now so the change is verified (the previous config is restored if ${CHRONY_SERVICE} rejects it)."
+    fi
+    apply_and_restart
+}
+
+# --------------------------------------------------------------------------
 # Main menu
 # --------------------------------------------------------------------------
 main_menu() {
+    local pending_note
     while true; do
+        pending_note=""
+        if (( CONFIG_PENDING == 1 )); then
+            pending_note="  (changes pending)"
+        fi
         echo ""
         echo "configure-ntp-server.sh ${SCRIPT_VERSION}  |  Host family: ${FAMILY} (${OS_ID})  |  Daemon: ${CHRONY_SERVICE}"
         echo "  1) View current configuration"
@@ -1195,7 +1251,7 @@ main_menu() {
         echo "  3) Configure allowed subnets"
         echo "  4) Auto-create firewall rule(s) for allowed subnets"
         echo "  5) Set / update local stratum lock"
-        echo "  6) Apply changes and restart ${CHRONY_SERVICE}"
+        echo "  6) Apply changes and restart ${CHRONY_SERVICE}${pending_note}"
         echo "  7) Exit"
         # If input closes (no terminal, closed stdin) there is nobody to
         # answer the menu; stop with a pointer to the unattended flags
@@ -1203,6 +1259,7 @@ main_menu() {
         read -rp "Choice: " opt || {
             echo "" >&2
             echo "ERROR: input closed before a menu choice was made. For scripted use, pass --sources, --allow, and/or --stratum (see --help)." >&2
+            resolve_pending_changes auto
             exit 1
         }
 
@@ -1213,7 +1270,7 @@ main_menu() {
             4) configure_firewall || true ;;
             5) manage_stratum_lock || true ;;
             6) apply_and_restart ;;
-            7) echo "Exiting."; exit 0 ;;
+            7) resolve_pending_changes ask; echo "Exiting."; exit 0 ;;
             *) echo "Invalid choice." ;;
         esac
     done
