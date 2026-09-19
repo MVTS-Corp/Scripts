@@ -1,4 +1,4 @@
-README.md v1.2.0 (Last Rev: 2026-08-22)
+README.md v1.3.0 (Last Rev: 2026-09-19)
 
 # Server-Setup
 
@@ -21,7 +21,9 @@ AlmaLinux) also detected and supported.
 - On Debian/Ubuntu hosts using netplan, sets `renderer: NetworkManager`
   in the netplan config so Cockpit's networking UI can actually manage
   the interfaces. No-op on Fedora/RHEL (no netplan there) and on hosts
-  not using netplan at all.
+  not using netplan at all. On hosts that build their initramfs with
+  dracut (Ubuntu 26.04), it also keeps networking out of the initramfs
+  (see [netplan](#netplan-debianubuntu-only) below for why).
 - Enables unattended OS updates (`unattended-upgrades` on Debian/Ubuntu,
   `dnf-automatic` with `apply_updates = yes` on Fedora/RHEL).
 - Creates the `usr_admin` group (GID 3000) and adds `root` plus the
@@ -114,6 +116,24 @@ connectivity if something about the change is wrong for this host. Run
 reboot. A timestamped backup of each edited YAML file is left alongside
 the original.
 
+**Initramfs (dracut hosts, e.g. Ubuntu 26.04).** The default dracut
+initramfs contains `systemd-networkd` and a DHCP-everything default
+network file, so it DHCPs the NIC before the real system starts and that
+address survives into the running system. With the NetworkManager
+renderer, nothing in netplan overrides it: NetworkManager adopts the
+leftover DHCP address instead of applying your static netplan profile,
+and the host boots on a DHCP address until someone runs `netplan apply`.
+To prevent this, the script copies Ubuntu's own dracut profile
+(`/usr/lib/dracut/dracut.conf.d/no-network/10-no-network.conf`) to
+`/etc/dracut.conf.d/10-no-network.conf` and rebuilds the initramfs with
+`update-initramfs -u`, so kernel updates keep building it that way. It
+takes effect on the next boot. It is skipped, with a warning, if the host
+looks like it needs the network in early boot (network root, iSCSI/NFS,
+`ip=`/`rd.neednet` on the kernel command line, or network settings in
+dracut's own config), or if `/etc/dracut.conf.d/10-no-network.conf`
+already exists with different content. To undo it, delete that file and
+run `sudo update-initramfs -u`.
+
 ### Re-running
 
 Every step is safe to run again - already-installed packages are
@@ -132,6 +152,7 @@ valid values.
 | Path | Purpose |
 |---|---|
 | `/var/log/server-setup/` | Per-run logs, `setup-<timestamp>.log` (kept 180 days) |
+| `/etc/dracut.conf.d/10-no-network.conf` | dracut hosts only: keeps networking out of the initramfs (see netplan above) |
 
 `/var/log/server-setup/` is root-only (mode 750) by default. It's locked
 down as soon as it's created - before `usr_admin` exists - so the `adm`

@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-09-18
-# Version: v1.2.2
+# 2026-09-19
+# Version: v1.3.0
 #
 # CHANGELOG:
+#   v1.3.0 - After switching netplan to the NetworkManager renderer, also
+#            install Ubuntu's dracut "no-network" profile into
+#            /etc/dracut.conf.d and rebuild the initramfs (dracut hosts
+#            only, skipped if early boot may need the network). Found on
+#            Ubuntu 26.04: the default initramfs DHCPs the NIC before the
+#            real system starts, NetworkManager adopts that leftover
+#            address instead of applying the static netplan profile, and
+#            the host boots on a DHCP address until 'netplan apply' is run.
+#            Verified on a live host: with the profile in place the static
+#            address is applied at boot.
 #   v1.2.2 - The netplan renderer insert (awk path) now preserves the
 #            original file's mode and owner. It previously replaced the
 #            file with a default-umask copy (644), which made netplan warn
@@ -235,6 +245,7 @@ if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
     echo "  - Set timezone to ${TIMEZONE}"
     echo "  - Install and enable Cockpit"
     echo "  - Set netplan's renderer to NetworkManager, if netplan is in use (not applied live)"
+    echo "    and, on dracut hosts, keep networking out of the initramfs (rebuilds it; next boot)"
     echo "  - Enable unattended OS updates"
     echo "  - Create the usr_admin group (GID 3000) if it doesn't already exist - you'll be asked"
     echo "    to confirm that specific step - and add root + ${ADMIN_USER}, with rwX ACLs on /opt"
@@ -316,6 +327,67 @@ install_cockpit() {
 }
 
 # ---------------------------------------------------------------------------
+# 4a. Keep dracut's initramfs from bringing the NIC up (called from
+#     configure_netplan_renderer, so only runs where netplan is in use)
+#
+# Ubuntu releases that build the initramfs with dracut ship an image that
+# contains systemd-networkd plus a DHCP-everything default .network file. It
+# DHCPs the NIC before the real system starts, and the address survives the
+# switch-root. With the NetworkManager renderer nothing in netplan overrides
+# it, so NetworkManager adopts that leftover address ("connection-assumed")
+# and never applies the static netplan profile: the host boots on a DHCP
+# address until someone runs 'netplan apply'. Ubuntu ships a dracut profile
+# that omits the networking modules, but only as an opt-in subdirectory.
+# ---------------------------------------------------------------------------
+configure_initramfs_no_network() {
+    local src="/usr/lib/dracut/dracut.conf.d/no-network/10-no-network.conf"
+    local dest="/etc/dracut.conf.d/10-no-network.conf"
+
+    if ! command -v dracut >/dev/null 2>&1 \
+        || ! command -v update-initramfs >/dev/null 2>&1 \
+        || [[ ! -f "$src" ]]; then
+        log_info "  initramfs: dracut's no-network profile is not available on this host; nothing to do."
+        return 0
+    fi
+    if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+        log_info "  initramfs: dracut no-network profile already installed, skipping."
+        return 0
+    fi
+    if [[ -e "$dest" ]]; then
+        log_warn "  initramfs: $dest already exists with different content; leaving it alone. If this host boots on a DHCP address until 'netplan apply', make sure it omits net-lib and systemd-networkd."
+        return 0
+    fi
+
+    # Only safe when nothing in early boot needs the network (network root,
+    # iSCSI, NFS): skip, and say so, if anything suggests otherwise.
+    local dracut_conf
+    dracut_conf="$(grep -hsvE '^[[:space:]]*#' /etc/dracut.conf /etc/dracut.conf.d/*.conf || true)"
+    if grep -qE '(^| )(netroot=|nfsroot=|ip=|rd\.neednet|root=(nfs|iscsi|cifs|nbd))' /proc/cmdline \
+        || [[ "$(findmnt -no FSTYPE / 2>/dev/null || true)" =~ ^(nfs|nfs4|cifs|9p|fuse.*)$ ]] \
+        || grep -qE 'network|nfs|iscsi|livenet|netroot' <<<"$dracut_conf"; then
+        log_warn "  initramfs: this host may need the network in early boot (network root, iSCSI/NFS, or dracut network settings); not removing networking from the initramfs. If it boots on a DHCP address until 'netplan apply', see this script's notes on the dracut default network file."
+        return 0
+    fi
+
+    log_info "  initramfs: installing dracut's no-network profile and rebuilding the initramfs (takes a minute)..."
+    install -m 644 "$src" "$dest"
+    if ! timeout 600 update-initramfs -u; then
+        rm -f "$dest"
+        die "update-initramfs failed. Removed $dest so future initramfs builds are unaffected; check /boot before rebooting."
+    fi
+
+    if command -v lsinitrd >/dev/null 2>&1; then
+        local leftover
+        leftover="$(lsinitrd 2>/dev/null | grep -ciE 'systemd-networkd|net-lib' || true)"
+        if [[ "${leftover:-0}" -ne 0 ]]; then
+            log_warn "  initramfs: still lists ${leftover} networking entries after the rebuild (lsinitrd checks the running kernel's image, which may not be the one just rebuilt if a newer kernel is installed)."
+            return 0
+        fi
+    fi
+    log_info "  initramfs: rebuilt without networking; takes effect on the next boot."
+}
+
+# ---------------------------------------------------------------------------
 # 4. netplan renderer (Debian/Ubuntu with netplan only - no-op elsewhere,
 #    including all of Fedora/RHEL which do not use netplan)
 # ---------------------------------------------------------------------------
@@ -360,6 +432,8 @@ configure_netplan_renderer() {
 
     netplan generate || die "netplan generate failed after editing renderer config - check the files under /etc/netplan for a syntax error (backups were saved alongside each edited file)."
     log_info "netplan config validated. NOT applied automatically (avoids disrupting an active remote session) - run 'sudo netplan apply' or reboot when ready."
+
+    configure_initramfs_no_network
 }
 
 # ---------------------------------------------------------------------------
