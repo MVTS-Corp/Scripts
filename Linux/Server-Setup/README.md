@@ -1,4 +1,4 @@
-README.md v1.5.0 (Last Rev: 2026-10-17)
+README.md v1.6.0 (Last Rev: 2026-10-17)
 
 # Server-Setup
 
@@ -34,6 +34,11 @@ AlmaLinux) also detected and supported.
   not using netplan at all. On hosts that build their initramfs with
   dracut (Ubuntu 26.04), it also keeps networking out of the initramfs
   (see [netplan](#netplan-debianubuntu-only) below for why).
+- Applies a baseline host firewall through `Linux/Firewall-Config`: all inbound
+  traffic blocked except SSH (rate limited) and Cockpit, with an optional
+  management subnet. See [Security baselines](#security-baselines).
+- Hardens SSH with a drop-in, installs fail2ban with an sshd jail, keeps the
+  journal across reboots, and installs hypervisor guest tools on VMs.
 - Enables unattended OS updates (`unattended-upgrades` on Debian/Ubuntu,
   `dnf-automatic` with `apply_updates = yes` on Fedora/RHEL).
 - Creates the `usr_admin` group (GID 3000) and adds `root` plus the
@@ -75,10 +80,12 @@ error), `3` completed but one or more items are flagged for review (see
 - `lib/distro.sh` - distro/package-manager detection.
 - `lib/common.sh` - shared logging/prompt helpers.
 
-It also calls two sibling tools in this repo rather than duplicating them:
-`../Group-MGMT/create-usr_admin-group.sh` (the `usr_admin` step) and
-`../NTP-Config/configure-ntp-server.sh` (the time synchronization step).
-Both are used from the sibling folder when present (the 1-click install and
+It also calls sibling tools in this repo rather than duplicating them:
+`../Group-MGMT/create-usr_admin-group.sh` (the `usr_admin` step),
+`../NTP-Config/configure-ntp-server.sh` (the time synchronization step), and
+`../Firewall-Config/configure-firewall.sh` (the firewall step); the optional
+`../Updates/install.sh` and `../Notifications/install.sh` are handed off to
+only on request. The first three are used from the sibling folder when present (the 1-click install and
 a full clone always have them) and fetched from GitHub otherwise.
 
 Options for the time synchronization step (see `--help` for all options):
@@ -210,6 +217,55 @@ skipped NTP step is flagged under "FLAGGED FOR REVIEW" in the final summary
 and the run exits `3` instead of `0`, so an RMM or wrapper can tell a clean
 run from one that needs a look. Re-running the script retries the step.
 
+### Security baselines
+
+Each of these is its own step with a `--skip-*` flag, and a failure in one is
+flagged in the final summary (exit code `3`) without stopping the run.
+
+**Firewall** (`--skip-firewall`, `--mgmt-subnet`, `--allow-port`). Runs right
+after the timezone, before Cockpit and NTP, so their rules land in an active
+firewall. It calls `Linux/Firewall-Config/configure-firewall.sh` (see its
+README): ufw on Debian/Ubuntu, firewalld on RHEL/Fedora; default-deny inbound;
+SSH allowed on the port `sshd` really uses, rate limited on ufw; Cockpit
+allowed. An interactive run asks **"Limit SSH and Cockpit to a management
+subnet?"** (blank means reachable from anywhere); `--mgmt-subnet 10.0.0.0/24`
+gives the answer up front, and `--allow-port 443/tcp` opens more ports. The SSH
+rules go in before the firewall is switched on, and it refuses to apply a
+restriction that would cut off a session that is open now. Docker publishes
+ports around the firewall; see the Firewall-Config README.
+
+**SSH hardening** (`--skip-ssh-hardening`, `--ssh-disable-passwords`). Writes
+`/etc/ssh/sshd_config.d/00-mvts-hardening.conf` (never an edit of
+`sshd_config`): 4 authentication attempts, 30 second login grace, no X11
+forwarding, no empty passwords, keepalives. The `00-` name matters: sshd keeps
+the first value it reads, so this must sort ahead of files like cloud-init's
+`50-cloud-init.conf`. Two settings can lock people out, so they are guarded:
+root SSH login is turned off only when the admin user can use sudo, and
+password logins only when you ask (`--ssh-disable-passwords`, or yes at the
+prompt, default no) and the admin user already has an SSH key. The file is
+checked with `sshd -t` and reverted if rejected, the service is reloaded (open
+sessions are not interrupted), and the settings are confirmed in `sshd -T`.
+
+**fail2ban** (`--skip-fail2ban`). Installs fail2ban with an sshd jail: 5
+failures within 10 minutes bans the address for 1 hour, and each repeat
+offense doubles the ban up to 1 week. The management subnet is never banned.
+Bans go through ufw when ufw is active. On RHEL it needs the EPEL repository.
+
+**Guest tools** (`--skip-guest-tools`). Detects the hypervisor with
+`systemd-detect-virt` and installs `qemu-guest-agent` (KVM/Proxmox),
+`open-vm-tools` (VMware), or the Hyper-V daemons. Nothing on physical hosts or
+containers.
+
+**Logging** (`--skip-logging`). Keeps the systemd journal across reboots,
+capped at 1G and 3 months, in `/etc/systemd/journald.conf.d/`.
+
+**Scheduled updates** (`--updates auto|reporting|skip`). `auto` (default) is
+unattended-upgrades or dnf-automatic with no email. `reporting` runs the
+`Linux/Updates` installer instead, for scheduled updates with an emailed
+report; it asks its own questions, so it needs a terminal. Do not run both
+updaters: with `reporting`, remove unattended-upgrades. An interactive run then
+offers to install `Linux/Notifications` (the `send-alert` command), default no.
+
 ### Operating system update
 
 The first step. On Debian/Ubuntu it refreshes the package lists and runs
@@ -268,6 +324,9 @@ valid values.
 | `/var/log/server-setup/` | Per-run logs, `setup-<timestamp>.log` (kept 180 days) |
 | `/var/log/server-setup/audit.log` | Append-only record of items flagged for review (NTP step failures); created on the first one, never pruned automatically |
 | `/etc/dracut.conf.d/10-no-network.conf` | dracut hosts only: keeps networking out of the initramfs (see netplan above) |
+| `/etc/ssh/sshd_config.d/00-mvts-hardening.conf` | SSH hardening drop-in (see Security baselines) |
+| `/etc/fail2ban/jail.d/50-mvts-baseline.local` | fail2ban baseline: sshd jail, escalating bans |
+| `/etc/systemd/journald.conf.d/50-mvts-baseline.conf` | Persistent journal with a size and age cap |
 
 `/var/log/server-setup/` is root-only (mode 750) by default. It's locked
 down as soon as it's created - before `usr_admin` exists - so the `adm`
@@ -336,6 +395,18 @@ Newest first. Versions are `setup-server.sh` versions; the full technical
 detail for each is in the changelog at the top of the script. Server-Setup
 runs straight from `main` and is not tagged; the release channels described
 in the top-level README apply to NTP-Config, which this tool calls.
+
+### v1.6.0 (2026-10-17)
+
+- Firewall step: baseline ufw or firewalld through the new
+  `Linux/Firewall-Config` tool (default-deny inbound, SSH rate limited, Cockpit,
+  optional `--mgmt-subnet` and `--allow-port`, lockout protection).
+- SSH hardening drop-in, fail2ban with an escalating-ban sshd jail, persistent
+  journald, and hypervisor guest tools, each with a `--skip-*` flag.
+- `--updates reporting` hands off to `Linux/Updates` for emailed update reports;
+  an interactive run can also install `Linux/Notifications`.
+- Optional-step failures are flagged for review (exit code `3`) instead of
+  stopping the run.
 
 ### v1.5.0 (2026-10-17)
 

@@ -1,4 +1,4 @@
-README.md v1.3.1 (Last Rev: 2026-09-19)
+README.md v1.4.0 (Last Rev: 2026-10-17)
 
 ## Overview
 
@@ -9,6 +9,9 @@ self-contained tool with its own README.
 
 - **Backups/** - backup and restore tooling for self-hosted services, one
   subfolder per service. See `Backups/README.md`.
+- **Firewall-Config/** - applies a baseline host firewall (ufw or firewalld):
+  default-deny inbound, SSH and Cockpit allowed, lockout protection. See
+  `Firewall-Config/README.md`.
 - **Group-MGMT/** - provisions fixed-GID groups consistently across the
   MVTS Linux fleet. See `Group-MGMT/README.md`.
 - **MVTS/** - installs the MVTS brand fonts system-wide. See
@@ -21,8 +24,9 @@ self-contained tool with its own README.
   so a host can send alert emails, independent of any other tool. See
   `Notifications/README.md`.
 - **Server-Setup/** - baseline provisioning for a freshly installed
-  server (packages, timezone, time synchronization via NTP-Config, Cockpit,
-  unattended updates, usr_admin permissions). See `Server-Setup/README.md`.
+  server (OS update, packages, host name, timezone, firewall, time
+  synchronization via NTP-Config, Cockpit, SSH hardening, fail2ban, journald,
+  scheduled updates, usr_admin permissions). See `Server-Setup/README.md`.
 - **Updates/** - automated OS patching with email alerting, deployed as a
   cron job. See `Updates/README.md`.
 
