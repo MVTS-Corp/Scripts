@@ -1,4 +1,4 @@
-README.md v2.3.0 (Last Rev: 2026-09-19)
+README.md v2.4.0 (Last Rev: 2026-10-17)
 
 # Linux NTP Config
 
@@ -34,7 +34,10 @@ The Windows equivalent lives in [Windows/NTP-Config](../../Windows/NTP-Config/RE
   `/usr/local/sbin/configure-ntp-server.sh`. Can also be run directly from a
   local clone: `sudo ./install.sh`.
 - **configure-ntp-server.sh** - the interactive tool itself. Menu options:
-  view current configuration, configure upstream time source(s), configure
+  view current configuration, configure upstream time source(s) (the OS default, the
+  preferred servers, your own list, or an NTP Pool for any country or region:
+  common countries first, then every continent with its countries sorted by
+  name, or a two-letter country code typed in), configure
   allowed subnets (adding/removing/replacing automatically creates or
   revokes the matching firewall rule for each subnet added or removed),
   auto-create firewall rule(s) (for re-syncing by hand), set/update the
@@ -174,7 +177,7 @@ sudo configure-ntp-server.sh --sources preferred --allow 192.168.1.0/24
 
 | Flag | Meaning |
 | --- | --- |
-| `--sources VALUE` | `native`, `usa`, `preferred`, or a comma/space separated list of hostnames or IPs |
+| `--sources VALUE` | `native`, `preferred`, `pool:ZONE`, or a comma/space separated list of hostnames or IPs. `ZONE` is a two-letter country code (`pool:de`, `pool:nz`) or a continent (`pool:europe`, `pool:north-america`, `pool:oceania`, ...). `usa` is still accepted and means `pool:us`. |
 | `--allow CIDRS` | The complete list of subnets allowed to query this host (comma/space separated), or `none`. It replaces the current list, and matching firewall rules are added and removed to follow. Repeatable. |
 | `--stratum N` | Local stratum lock, 0 to 15, or `none` to remove it |
 | `--no-firewall` | Do not create or revoke firewall rules (with `--allow`) |

@@ -2,7 +2,7 @@
 #
 # configure-ntp-server.sh
 # 2026-09-19
-# Version: v1.7.0
+# Version: v1.8.0
 #
 # PURPOSE:
 # Tool to view and configure a Linux host (Debian, Ubuntu, RHEL, or Fedora
@@ -26,8 +26,11 @@
 #   configure-ntp-server.sh [SETTINGS] [OPTIONS]  unattended (never prompts)
 #
 #   SETTINGS (any combination; at least one selects unattended mode):
-#     --sources VALUE   native | usa | preferred, or a comma/space separated
-#                       list of hostnames or IPs
+#     --sources VALUE   native | preferred | pool:ZONE, or a comma/space
+#                       separated list of hostnames or IPs. ZONE is a
+#                       two-letter country code (pool:de, pool:nz) or a
+#                       continent (pool:europe, pool:north-america, ...).
+#                       "usa" still works and means pool:us.
 #     --allow CIDRS     comma/space separated list of subnets allowed to query
 #                       this host, or "none". The list REPLACES the current
 #                       one; matching firewall rules are added and removed
@@ -55,6 +58,13 @@
 #   2  invalid arguments; nothing on the system was touched
 #
 # CHANGELOG:
+#   v1.8.0 - The "NTP Pool for USA" source choice is replaced by a pool
+#            chooser for any country or region: common countries first, then
+#            each continent with a whole-region entry and its countries
+#            sorted by name, or a two-letter country code typed directly.
+#            Unattended callers use --sources pool:ZONE (pool:de,
+#            pool:europe, ...). --sources usa is still accepted and means
+#            pool:us.
 #   v1.7.0 - The interactive menu now tracks configuration changes that
 #            have been written to the chrony config but not applied. Menu
 #            options 2, 3, and 5 only edit the file; only option 6
@@ -107,7 +117,7 @@ set -f
 # --------------------------------------------------------------------------
 # Globals
 # --------------------------------------------------------------------------
-SCRIPT_VERSION="v1.7.0"
+SCRIPT_VERSION="v1.8.0"
 SOURCES_TAG="NTP-SCRIPT-SOURCES"
 ALLOW_TAG="NTP-SCRIPT-ALLOW"
 STRATUM_TAG="NTP-SCRIPT-STRATUM"
@@ -159,6 +169,19 @@ WANT_ALLOW=()
 validate_source_token() {
     local tok="$1"
     [[ "${tok}" =~ ^[A-Za-z0-9.:-]+$ ]]
+}
+
+# NTP Pool zones: a two-letter country code, or one of the continental zones.
+# Every zone maps to 0-3.<zone>.pool.ntp.org.
+POOL_CONTINENTS="africa asia europe north-america oceania south-america"
+
+valid_pool_zone() {
+    local z="$1" c
+    [[ "${z}" =~ ^[a-z]{2}$ ]] && return 0
+    for c in ${POOL_CONTINENTS}; do
+        [[ "${z}" == "${c}" ]] && return 0
+    done
+    return 1
 }
 
 # A git ref (branch or tag) as it appears in the install state file.
@@ -215,12 +238,19 @@ validate_args() {
         # An empty value (typically an unset shell variable in the caller)
         # must be an error, not "no setting": otherwise the run would fall
         # through to the interactive menu.
-        [[ -n "${OPT_SOURCES//[[:space:],]/}" ]] || usage_error "--sources needs a value: native, usa, preferred, or a list of hostnames/IPs."
+        [[ -n "${OPT_SOURCES//[[:space:],]/}" ]] || usage_error "--sources needs a value: native, preferred, pool:ZONE, or a list of hostnames/IPs."
         case "${OPT_SOURCES}" in
-            native|usa|preferred) ;;
+            native|preferred) ;;
+            usa) OPT_SOURCES="pool:us" ;;   # kept so existing callers still work
+            pool:*)
+                tok="${OPT_SOURCES#pool:}"
+                tok="${tok,,}"
+                valid_pool_zone "${tok}" || usage_error "--sources: 'pool:${tok}' needs a two-letter country code (pool:de) or a continent: ${POOL_CONTINENTS}."
+                OPT_SOURCES="pool:${tok}"
+                ;;
             *)
                 for tok in ${OPT_SOURCES//,/ }; do
-                    validate_source_token "${tok}" || usage_error "--sources: '${tok}' is not native, usa, preferred, or a valid hostname/IP."
+                    validate_source_token "${tok}" || usage_error "--sources: '${tok}' is not native, preferred, pool:ZONE, or a valid hostname/IP."
                 done
                 ;;
         esac
@@ -590,8 +620,177 @@ native_sources_for_os() {
     esac
 }
 
-USA_POOL_SOURCES="0.us.pool.ntp.org 1.us.pool.ntp.org 2.us.pool.ntp.org 3.us.pool.ntp.org"
 PREFERRED_SOURCES="time.cloudflare.com us.pool.ntp.org time.nist.gov"
+
+# (POOL_CONTINENTS and valid_pool_zone are defined with the validators above.)
+# Shown first in the menu, in this order.
+POOL_COMMON="us ca gb au nz de fr ie"
+# region|code|name. The menu sorts these by region, then name.
+POOL_COUNTRIES='Africa|dz|Algeria
+Africa|bw|Botswana
+Africa|eg|Egypt
+Africa|gh|Ghana
+Africa|ke|Kenya
+Africa|ma|Morocco
+Africa|mu|Mauritius
+Africa|na|Namibia
+Africa|ng|Nigeria
+Africa|sn|Senegal
+Africa|za|South Africa
+Africa|tz|Tanzania
+Africa|tn|Tunisia
+Africa|ug|Uganda
+Africa|zw|Zimbabwe
+Asia|bh|Bahrain
+Asia|bd|Bangladesh
+Asia|cn|China
+Asia|hk|Hong Kong
+Asia|in|India
+Asia|id|Indonesia
+Asia|ir|Iran
+Asia|iq|Iraq
+Asia|il|Israel
+Asia|jp|Japan
+Asia|jo|Jordan
+Asia|kz|Kazakhstan
+Asia|kw|Kuwait
+Asia|lb|Lebanon
+Asia|my|Malaysia
+Asia|np|Nepal
+Asia|om|Oman
+Asia|pk|Pakistan
+Asia|ph|Philippines
+Asia|qa|Qatar
+Asia|sa|Saudi Arabia
+Asia|sg|Singapore
+Asia|kr|South Korea
+Asia|lk|Sri Lanka
+Asia|tw|Taiwan
+Asia|th|Thailand
+Asia|tr|Turkey
+Asia|ae|United Arab Emirates
+Asia|vn|Vietnam
+Europe|al|Albania
+Europe|at|Austria
+Europe|by|Belarus
+Europe|be|Belgium
+Europe|ba|Bosnia and Herzegovina
+Europe|bg|Bulgaria
+Europe|hr|Croatia
+Europe|cy|Cyprus
+Europe|cz|Czechia
+Europe|dk|Denmark
+Europe|ee|Estonia
+Europe|fi|Finland
+Europe|fr|France
+Europe|de|Germany
+Europe|gr|Greece
+Europe|hu|Hungary
+Europe|is|Iceland
+Europe|ie|Ireland
+Europe|it|Italy
+Europe|lv|Latvia
+Europe|lt|Lithuania
+Europe|lu|Luxembourg
+Europe|mt|Malta
+Europe|md|Moldova
+Europe|nl|Netherlands
+Europe|mk|North Macedonia
+Europe|no|Norway
+Europe|pl|Poland
+Europe|pt|Portugal
+Europe|ro|Romania
+Europe|ru|Russia
+Europe|rs|Serbia
+Europe|sk|Slovakia
+Europe|si|Slovenia
+Europe|es|Spain
+Europe|se|Sweden
+Europe|ch|Switzerland
+Europe|ua|Ukraine
+Europe|gb|United Kingdom
+North America|bs|Bahamas
+North America|bb|Barbados
+North America|ca|Canada
+North America|cr|Costa Rica
+North America|do|Dominican Republic
+North America|sv|El Salvador
+North America|gt|Guatemala
+North America|hn|Honduras
+North America|jm|Jamaica
+North America|mx|Mexico
+North America|ni|Nicaragua
+North America|pa|Panama
+North America|pr|Puerto Rico
+North America|tt|Trinidad and Tobago
+North America|us|United States
+Oceania|au|Australia
+Oceania|fj|Fiji
+Oceania|nc|New Caledonia
+Oceania|nz|New Zealand
+Oceania|pg|Papua New Guinea
+South America|ar|Argentina
+South America|bo|Bolivia
+South America|br|Brazil
+South America|cl|Chile
+South America|co|Colombia
+South America|ec|Ecuador
+South America|py|Paraguay
+South America|pe|Peru
+South America|uy|Uruguay
+South America|ve|Venezuela'
+
+# pool_zone_hosts ZONE - the four pool hostnames for a zone.
+pool_zone_hosts() {
+    local z="$1"
+    echo "0.${z}.pool.ntp.org 1.${z}.pool.ntp.org 2.${z}.pool.ntp.org 3.${z}.pool.ntp.org"
+}
+
+pool_country_name() {
+    awk -F'|' -v c="$1" '$2 == c { print $3; exit }' <<< "${POOL_COUNTRIES}"
+}
+
+# Sets POOL_ZONE (and CHOSEN_SOURCES) from a menu: common countries first,
+# then every region with a "whole region" entry and its countries sorted by
+# name. A two-letter country code can also be typed directly.
+select_pool_zone() {
+    local codes=() c name region last="" slug pick zone
+    echo ""
+    echo "NTP Pool zone (servers close to you answer fastest):"
+    echo "  Common"
+    for c in ${POOL_COMMON}; do
+        codes+=("${c}")
+        printf '  %3d) %s (%s)\n' "${#codes[@]}" "$(pool_country_name "${c}")" "${c}"
+    done
+    while IFS='|' read -r region c name; do
+        if [[ "${region}" != "${last}" ]]; then
+            last="${region}"
+            slug="${region,,}"
+            slug="${slug// /-}"
+            codes+=("${slug}")
+            printf '\n  %s\n' "${region}"
+            printf '  %3d) Anywhere in %s (%s)\n' "${#codes[@]}" "${region}" "${slug}"
+        fi
+        codes+=("${c}")
+        printf '  %3d) %s (%s)\n' "${#codes[@]}" "${name}" "${c}"
+    done < <(printf '%s\n' "${POOL_COUNTRIES}" | LC_ALL=C sort -t'|' -k1,1 -k3,3)
+
+    echo ""
+    read -rp "Number, or a two-letter country code such as se [1]: " pick
+    pick="${pick:-1}"
+    if [[ "${pick}" =~ ^[0-9]+$ ]]; then
+        if (( pick < 1 || pick > ${#codes[@]} )); then
+            echo "ERROR: choose a number from 1 to ${#codes[@]}." >&2
+            return 1
+        fi
+        zone="${codes[pick-1]}"
+    else
+        zone="${pick,,}"
+        valid_pool_zone "${zone}" || { echo "ERROR: '${pick}' is not a number or a two-letter country code." >&2; return 1; }
+    fi
+    POOL_ZONE="${zone}"
+    CHOSEN_SOURCES="$(pool_zone_hosts "${zone}")"
+}
 
 # --------------------------------------------------------------------------
 # Source selection menu
@@ -604,7 +803,7 @@ select_time_sources() {
     echo ""
     echo "Select upstream time source set:"
     echo "  1) OS / Native / Default   (${native_default})"
-    echo "  2) NTP Pool for USA        (${USA_POOL_SOURCES})"
+    echo "  2) NTP Pool for a country or region (you pick next)"
     echo "  3) Preferred servers       (${PREFERRED_SOURCES})"
     echo "  4) Custom"
     read -rp "Choice [1]: " choice
@@ -612,7 +811,7 @@ select_time_sources() {
 
     case "${choice}" in
         1) CHOSEN_SOURCES="${native_default}" ;;
-        2) CHOSEN_SOURCES="${USA_POOL_SOURCES}" ;;
+        2) select_pool_zone || return 1 ;;
         3) CHOSEN_SOURCES="${PREFERRED_SOURCES}" ;;
         4)
             read -rp "Enter custom server(s), space separated: " custom
@@ -1091,7 +1290,7 @@ run_unattended() {
         local want_list
         case "${OPT_SOURCES}" in
             native) want_list="$(native_sources_for_os)" ;;
-            usa) want_list="${USA_POOL_SOURCES}" ;;
+            pool:*) want_list="$(pool_zone_hosts "${OPT_SOURCES#pool:}")" ;;
             preferred) want_list="${PREFERRED_SOURCES}" ;;
             *) want_list="${OPT_SOURCES//,/ }" ;;
         esac

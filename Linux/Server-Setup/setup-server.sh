@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-09-19
-# Version: v1.4.1
+# 2026-10-17
+# Version: v1.5.0
 #
 # CHANGELOG:
+#   v1.5.0 - Fixes from issue #3 (found on Ubuntu Server 2026 LTS):
+#            * The admin user is optional. With no --admin-user and no sudo
+#              user to default to, an interactive run lets the answer be
+#              blank and an unattended run carries on; usr_admin then holds
+#              root only. It used to stop with "a user must be specified".
+#            * New first step: a full operating system update (apt full-
+#              upgrade, or dnf upgrade) before anything else is installed;
+#              --skip-os-update skips it. The final summary says when the
+#              host needs a reboot afterward.
+#            * New step after the base packages: offers to change the host
+#              name, entered as one full name including the domain (for
+#              example server01.example.com), or pass --hostname.
+#            * The time servers now default to NTP-Config's "preferred" set
+#              (interactive runs ask first and can decline, and can open
+#              the NTP-Config menu to choose something else; unattended runs
+#              apply it unless --ntp-sources says otherwise or --skip-ntp is
+#              given). Previously --yes alone left the time servers alone.
+#            Works with NTP-Config v1.8.0, whose menu now offers a pool for
+#            any country or region instead of only the USA.
 #   v1.4.1 - The dialog shown before "Proceed?" is now a numbered plan in
 #            run order, tailored to the host: each step says what it will
 #            change here (packages for this distro family, the NTP path
@@ -99,9 +118,9 @@
 #            without actually inserting the renderer line.
 #
 # PURPOSE:
-# Baseline provisioning for a freshly installed Linux server: base
-# packages, timezone, time synchronization (via NTP-Config/
-# configure-ntp-server.sh), Cockpit, NetworkManager as the netplan
+# Baseline provisioning for a freshly installed Linux server: operating
+# system update, base packages, host name, timezone, time synchronization
+# (via NTP-Config/configure-ntp-server.sh), Cockpit, NetworkManager as the netplan
 # renderer (where applicable), unattended OS updates, and the usr_admin
 # permissions group on /opt (via Group-MGMT/create-usr_admin-group.sh).
 # Detects the host distro and adapts package names/mechanisms
@@ -109,7 +128,8 @@
 # (RHEL, CentOS, Rocky, AlmaLinux). Safe to re-run.
 #
 # USAGE:
-#   setup-server.sh --admin-user NAME [--timezone TZ] [--yes]
+#   setup-server.sh [--admin-user NAME] [--hostname FQDN] [--timezone TZ]
+#                   [--yes] [--skip-os-update]
 #                   [--skip-ntp | [--ntp-sources V] [--ntp-allow CIDRS]
 #                                 [--ntp-stratum N]]
 #   setup-server.sh --check                Dependency/pre-flight checks only
@@ -151,12 +171,14 @@ NTP_URL="https://raw.githubusercontent.com/MVTS-Corp/Scripts/stable/Linux/NTP-Co
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.4.1"
+SCRIPT_VERSION="v1.5.0"
 
 ADMIN_USER=""
+NEW_HOSTNAME=""
 TIMEZONE="America/New_York"
 ASSUME_YES=0
 CHECK_ONLY=0
+SKIP_OS_UPDATE=0
 SKIP_NTP=0
 NTP_SOURCES=""
 NTP_ALLOW=""
@@ -169,6 +191,9 @@ NTP_STRATUM_SET=0
 # human to look at it afterward (which also makes the run exit 3).
 NTP_OUTCOME="not run"
 FLAGGED_ITEMS=()
+# What NTP-Config's "preferred" source set contains, for display only (the
+# tool owns the real list; this is not passed to it).
+NTP_PREFERRED_DESC="time.cloudflare.com, us.pool.ntp.org, time.nist.gov"
 NTP_TOOL=""
 NTP_TOOL_SRC=""
 NTP_TOOL_VERSION=""
@@ -177,27 +202,35 @@ NTP_ERR=""
 
 usage() {
     cat <<EOF
-Usage: sudo ${0##*/} --admin-user NAME [--timezone TZ] [--yes]
+Usage: sudo ${0##*/} [--admin-user NAME] [--hostname FQDN] [--timezone TZ] [--yes]
+                     [--skip-os-update]
                      [--skip-ntp | --ntp-sources V --ntp-allow CIDRS --ntp-stratum N]
        sudo ${0##*/} --check
 
   --admin-user NAME  Existing local username to add (alongside root) to
-                     the usr_admin group. If omitted, defaults to the user
-                     who ran sudo (\$SUDO_USER); if that isn't available
-                     (run directly as root), you are prompted instead, or
-                     it is required when no terminal is attached (except
-                     with --check). If usr_admin doesn't exist
-                     yet, you'll be asked separately to confirm creating
-                     it - declining skips that step only, not the rest
-                     of provisioning.
+                     the usr_admin group. Optional. If omitted, defaults to
+                     the user who ran sudo (\$SUDO_USER); if that isn't
+                     available (run directly as root), you are prompted and
+                     can leave the answer blank, or with no terminal the
+                     group simply holds root only. If usr_admin doesn't
+                     exist yet, you'll be asked separately to confirm
+                     creating it - declining skips that step only, not the
+                     rest of provisioning.
+  --hostname FQDN    Set the host name, as one full name including the
+                     domain (for example server01.example.com). Without it,
+                     an interactive run asks whether to change the host
+                     name; an unattended run leaves it alone.
   --timezone TZ      IANA timezone name (default: America/New_York).
   --yes              Skip all confirmation prompts, including usr_admin
-                     creation if it doesn't already exist. The time
-                     synchronization step then only shows the current
-                     configuration, unless --ntp-* settings are given.
+                     creation if it doesn't already exist. The time servers
+                     are then set to the preferred set unless --ntp-sources
+                     or --skip-ntp says otherwise.
+  --skip-os-update   Skip the full operating system update that runs first.
   --skip-ntp         Skip the time synchronization (NTP) step entirely.
-  --ntp-sources V    Set the time sources unattended: native, usa,
-                     preferred, or a comma separated list of hostnames/IPs.
+  --ntp-sources V    Set the time sources unattended: native, preferred
+                     (the default), pool:ZONE (a country code such as
+                     pool:de, or a continent such as pool:europe), or a
+                     comma separated list of hostnames/IPs.
   --ntp-allow CIDRS  Set the subnets allowed to query this host for time
                      (comma separated), or "none". Repeatable.
   --ntp-stratum N    Set the local stratum lock (0-15), or "none".
@@ -212,7 +245,8 @@ review (for example NTP skipped after an error).
 Examples:
   sudo ./${0##*/} --admin-user jsmith
   sudo ./${0##*/} --admin-user jsmith --timezone America/Chicago --yes
-  sudo ./${0##*/} --admin-user jsmith --yes --ntp-sources preferred --ntp-allow 192.168.1.0/24
+  sudo ./${0##*/} --yes --hostname web01.example.com --ntp-sources pool:de
+  sudo ./${0##*/} --admin-user jsmith --yes --ntp-allow 192.168.1.0/24
 EOF
 }
 
@@ -221,9 +255,14 @@ while [[ $# -gt 0 ]]; do
         --admin-user)
             [[ $# -ge 2 ]] || { echo "ERROR: --admin-user requires a value." >&2; exit 1; }
             ADMIN_USER="$2"; shift 2 ;;
+        --hostname)
+            [[ $# -ge 2 ]] || { echo "ERROR: --hostname requires a value." >&2; exit 1; }
+            NEW_HOSTNAME="$2"; shift 2 ;;
         --timezone)
             [[ $# -ge 2 ]] || { echo "ERROR: --timezone requires a value." >&2; exit 1; }
             TIMEZONE="$2"; shift 2 ;;
+        --skip-os-update)
+            SKIP_OS_UPDATE=1; shift ;;
         --yes)
             ASSUME_YES=1; shift ;;
         --check)
@@ -248,7 +287,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# valid_hostname NAME - a host name or full domain name (RFC 1123): labels of
+# letters, digits and hyphens, 1-63 characters each, not starting or ending
+# with a hyphen, 253 characters in all.
+valid_hostname() {
+    local name="$1" label
+    [[ -n "$name" && ${#name} -le 253 ]] || return 1
+    local IFS=.
+    for label in $name; do
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+    done
+    [[ "$name" != *..* && "$name" != .* ]]
+}
+
+if [[ -n "$NEW_HOSTNAME" ]]; then
+    NEW_HOSTNAME="${NEW_HOSTNAME%.}"
+    NEW_HOSTNAME="${NEW_HOSTNAME,,}"
+    valid_hostname "$NEW_HOSTNAME" || { echo "ERROR: --hostname '${NEW_HOSTNAME}' is not a valid host name. Use letters, digits and hyphens in each part, for example server01.example.com." >&2; exit 1; }
+fi
+
+# True when something the operator typed on the command line is an NTP answer
+# (as opposed to the "preferred" default applied when nothing was said).
 NTP_HAS_SETTINGS=$(( NTP_SOURCES_SET || NTP_ALLOW_SET || NTP_STRATUM_SET ))
+
+# True when a person can be asked a question (same test the other prompts use).
+is_interactive() { [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; }
+
 if (( SKIP_NTP && NTP_HAS_SETTINGS )); then
     echo "ERROR: --skip-ntp cannot be combined with --ntp-sources, --ntp-allow, or --ntp-stratum." >&2
     exit 1
@@ -327,17 +391,23 @@ if [[ -z "$ADMIN_USER" && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] \
     log_info "No --admin-user given; using the invoking sudo user: ${ADMIN_USER} (pass --admin-user NAME to use someone else)."
 fi
 
-if [[ -z "$ADMIN_USER" ]]; then
-    if [[ -t 0 ]]; then
-        ADMIN_USER="$(ask "Existing local username to add (alongside root) to usr_admin")"
-    fi
-    if [[ -z "$ADMIN_USER" && "$CHECK_ONLY" -ne 1 ]]; then
-        die "--admin-user is required (existing local username to add to usr_admin, alongside root)."
-    fi
+# The admin user is optional. A blank answer (or none, with no terminal)
+# means usr_admin holds root only; root is always a member.
+if [[ -z "$ADMIN_USER" && "$CHECK_ONLY" -ne 1 && "$ASSUME_YES" -ne 1 && -t 0 ]]; then
+    ADMIN_USER="$(ask "Existing local username to add (alongside root) to usr_admin, or press Enter for root only")"
+fi
+if [[ "$ADMIN_USER" == "root" ]]; then
+    ADMIN_USER=""
 fi
 if [[ -n "$ADMIN_USER" ]] && ! id -u "$ADMIN_USER" >/dev/null 2>&1; then
     die "User '${ADMIN_USER}' does not exist on this system. Create the account first, then re-run."
 fi
+if [[ -z "$ADMIN_USER" && "$CHECK_ONLY" -ne 1 ]]; then
+    log_info "No admin user given; the usr_admin group will hold root only (pass --admin-user NAME to add someone)."
+fi
+# What goes into usr_admin, as a comma separated list and as prose.
+ADMIN_MEMBERS="root${ADMIN_USER:+,${ADMIN_USER}}"
+ADMIN_MEMBERS_TEXT="root${ADMIN_USER:+ and ${ADMIN_USER}}"
 
 if (( CHECK_ONLY )); then
     log_info "Checks passed. --check specified, exiting without making changes."
@@ -366,20 +436,36 @@ print_provisioning_plan() {
         updates="Install and enable dnf-automatic with apply_updates = yes so OS updates apply automatically."
     fi
 
+    local timesyncd_note=""
+    if systemctl is-active --quiet systemd-timesyncd 2>/dev/null && ! command -v chronyd >/dev/null 2>&1; then
+        timesyncd_note=" Installing chrony replaces systemd-timesyncd, which is what this host uses now."
+    fi
     if (( SKIP_NTP )); then
         ntp="Skipped (--skip-ntp). The time configuration is left exactly as it is."
-    elif (( NTP_HAS_SETTINGS )); then
+    elif (( NTP_HAS_SETTINGS )) || ! is_interactive; then
         ntp="Configure time synchronization (chrony) from the command line:"
-        (( NTP_SOURCES_SET )) && ntp+=" sources = ${NTP_SOURCES};"
+        ntp+=" sources = ${NTP_SOURCES:-preferred ($NTP_PREFERRED_DESC, the default)};"
         (( NTP_ALLOW_SET )) && ntp+=" allowed subnets = ${NTP_ALLOW};"
         (( NTP_STRATUM_SET )) && ntp+=" stratum lock = ${NTP_STRATUM};"
-        ntp="${ntp%;}. Installs chrony if it is missing, via NTP-Config."
+        ntp="${ntp%;}. Installs chrony if it is missing, via NTP-Config.${timesyncd_note}"
     else
-        ntp="Show the current time server configuration, then ask whether it needs to change (default: no). If you answer yes, NTP-Config's menu opens: it installs chrony if it is missing, and lets you set the time sources, the subnets allowed to query this host, and a stratum lock."
-        if systemctl is-active --quiet systemd-timesyncd 2>/dev/null && ! command -v chronyd >/dev/null 2>&1; then
-            ntp+=" Installing chrony replaces systemd-timesyncd, which is what this host uses now."
-        fi
-        ntp+=" If you answer no, nothing about time is changed."
+        ntp="Show the current time server configuration, then offer to set the time servers to the preferred set (${NTP_PREFERRED_DESC}); you can decline, and then choose to open NTP-Config's menu to pick a country or region pool, your own servers, allowed subnets or a stratum lock instead.${timesyncd_note}"
+    fi
+
+    local os_update host_txt
+    if (( SKIP_OS_UPDATE )); then
+        os_update="Skipped (--skip-os-update)."
+    elif [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        os_update="Refresh the package lists and install every available update (apt full-upgrade). This can take several minutes on a fresh install; the host is not rebooted, and you are told at the end if it needs one."
+    else
+        os_update="Install every available update (${PKG_MANAGER} upgrade). This can take several minutes on a fresh install; the host is not rebooted, and you are told at the end if it needs one."
+    fi
+    if [[ -n "$NEW_HOSTNAME" ]]; then
+        host_txt="Change the host name from $(hostname) to ${NEW_HOSTNAME} (--hostname)."
+    elif is_interactive; then
+        host_txt="Show the current host name ($(hostname -f 2>/dev/null || hostname)) and ask whether to change it. If you do, enter the full name including the domain, in one line (for example server01.example.com)."
+    else
+        host_txt="Not changed (no --hostname given)."
     fi
 
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
@@ -399,9 +485,8 @@ print_provisioning_plan() {
         netplan_txt="Not applicable: netplan is not in use on this host, so nothing is changed."
     fi
 
-    local members="root and ${ADMIN_USER}" member_verb="are members"
-    if [[ "$ADMIN_USER" == "root" ]]; then
-        members="root"
+    local members="$ADMIN_MEMBERS_TEXT" member_verb="are members"
+    if [[ -z "$ADMIN_USER" ]]; then
         member_verb="is a member"
     fi
 
@@ -415,13 +500,15 @@ print_provisioning_plan() {
     echo "About to provision this host (${DISTRO_NAME}) as a baseline MVTS server."
     echo "The steps below run in this order:"
     echo
-    plan_step 1 "Base packages" "Install ${pkgs}."
-    plan_step 2 "Timezone" "Set the system timezone to ${TIMEZONE}."
-    plan_step 3 "Time synchronization (NTP)" "$ntp"
-    plan_step 4 "Cockpit" "Install and enable Cockpit, the web management console (https://<host>:9090). ${cockpit_fw}"
-    plan_step 5 "Network renderer (netplan)" "$netplan_txt"
-    plan_step 6 "Unattended updates" "$updates"
-    plan_step 7 "usr_admin group and /opt permissions" "$usr_admin_txt"
+    plan_step 1 "Operating system update" "$os_update"
+    plan_step 2 "Base packages" "Install ${pkgs}."
+    plan_step 3 "Host name" "$host_txt"
+    plan_step 4 "Timezone" "Set the system timezone to ${TIMEZONE}."
+    plan_step 5 "Time synchronization (NTP)" "$ntp"
+    plan_step 6 "Cockpit" "Install and enable Cockpit, the web management console (https://<host>:9090). ${cockpit_fw}"
+    plan_step 7 "Network renderer (netplan)" "$netplan_txt"
+    plan_step 8 "Unattended updates" "$updates"
+    plan_step 9 "usr_admin group and /opt permissions" "$usr_admin_txt"
     echo
     echo "The host is not rebooted and no network change is applied live."
     echo "Every step is safe to re-run."
@@ -433,6 +520,45 @@ if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
     print_provisioning_plan
     confirm "Proceed?" "y" || { log_info "Aborted, no changes made."; exit 0; }
 fi
+
+# ---------------------------------------------------------------------------
+# 0. Operating system update. First, so everything after it installs against
+#    current package lists and a current base system. Non-interactive: keep
+#    the local version of any config file the host already customized, and
+#    wait for the package lock instead of failing if another updater (for
+#    example cloud-init or unattended-upgrades on first boot) holds it.
+# ---------------------------------------------------------------------------
+update_operating_system() {
+    log_info "== Operating system update =="
+    if (( SKIP_OS_UPDATE )); then
+        log_info "Skipped (--skip-os-update)."
+        return 0
+    fi
+    case "$DISTRO_FAMILY" in
+        debian)
+            timeout 600 apt-get -o DPkg::Lock::Timeout=300 update -y
+            timeout 3600 apt-get -o DPkg::Lock::Timeout=300 \
+                -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+                full-upgrade -y
+            ;;
+        fedora|rhel)
+            timeout 3600 "$PKG_MANAGER" upgrade -y --refresh
+            ;;
+    esac
+    log_info "Operating system is up to date."
+}
+
+# True when the host should be rebooted to finish applying updates.
+reboot_required() {
+    if [[ -e /var/run/reboot-required ]]; then
+        return 0
+    fi
+    # dnf-utils' needs-restarting -r exits 1 when a reboot is needed.
+    if command -v needs-restarting >/dev/null 2>&1; then
+        needs-restarting -r >/dev/null 2>&1 || [[ $? -ne 1 ]] || return 0
+    fi
+    return 1
+}
 
 # ---------------------------------------------------------------------------
 # 1. Base packages
@@ -452,6 +578,73 @@ install_base_packages() {
         command -v "$cmd" >/dev/null 2>&1 || die "Base package install did not provide the expected command: ${cmd}."
     done
     log_info "Base packages installed and verified."
+}
+
+# ---------------------------------------------------------------------------
+# 1a. Host name. The name is set as one full name including the domain (the
+#     static host name becomes the FQDN), so the operator types it once. On
+#     hosts that carry a 127.0.1.1 line in /etc/hosts (Debian/Ubuntu), that
+#     line is kept in step so the new name still resolves locally.
+# ---------------------------------------------------------------------------
+update_hosts_file() {
+    local fqdn="$1" short="${1%%.*}" hosts="/etc/hosts" entry new
+    if [[ "$fqdn" == "$short" ]]; then
+        entry="127.0.1.1 ${fqdn}"
+    else
+        entry="127.0.1.1 ${fqdn} ${short}"
+    fi
+    if grep -Eq '^[[:space:]]*127\.0\.1\.1[[:space:]]' "$hosts"; then
+        cp -a "$hosts" "${hosts}.bak-$(date '+%Y%m%d-%H%M%S')"
+        # Rewritten in place (not sed -i, which renames a new file over it):
+        # /etc/hosts can be a bind mount, and this keeps its owner and mode.
+        new="$(sed -E "s/^[[:space:]]*127\.0\.1\.1[[:space:]].*/${entry}/" "$hosts")"
+        printf '%s\n' "$new" > "$hosts"
+        log_info "  ${hosts}: updated the 127.0.1.1 entry (backup saved alongside it)."
+    elif [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        cp -a "$hosts" "${hosts}.bak-$(date '+%Y%m%d-%H%M%S')"
+        printf '%s\n' "$entry" >> "$hosts"
+        log_info "  ${hosts}: added a 127.0.1.1 entry (backup saved alongside it)."
+    fi
+}
+
+configure_hostname() {
+    log_info "== Host name =="
+    local current new="$NEW_HOSTNAME"
+    current="$(hostnamectl --static 2>/dev/null || hostname)"
+    log_info "Current host name: ${current:-unset} (fully qualified: $(hostname -f 2>/dev/null || echo unknown))"
+
+    if [[ -z "$new" ]]; then
+        if ! is_interactive; then
+            log_info "No --hostname given; leaving the host name as it is."
+            return 0
+        fi
+        if ! confirm "Do you want to change the host name of this server?" "n"; then
+            log_info "Leaving the host name as it is."
+            return 0
+        fi
+        while :; do
+            new="$(ask "New host name, including the domain, in one line (for example server01.example.com; blank to keep ${current})")"
+            if [[ -z "$new" ]]; then
+                log_info "No name entered; leaving the host name as it is."
+                return 0
+            fi
+            new="${new%.}"
+            new="${new,,}"
+            valid_hostname "$new" && break
+            echo "'${new}' is not a valid host name. Use letters, digits and hyphens in each part, parts separated by dots."
+        done
+    fi
+
+    if [[ "$new" == "$current" ]]; then
+        log_info "Host name is already ${new}; nothing to change."
+        return 0
+    fi
+    timeout 30 hostnamectl set-hostname "$new" || die "Failed to set the host name to '${new}'."
+    local actual
+    actual="$(hostnamectl --static 2>/dev/null || true)"
+    [[ "$actual" == "$new" ]] || die "Host name set to ${new} but hostnamectl now reports '${actual}'."
+    update_hosts_file "$new"
+    log_info "Host name changed from ${current} to ${new}. Open shell sessions show the new name after the next login."
 }
 
 # ---------------------------------------------------------------------------
@@ -478,9 +671,6 @@ set_timezone() {
 #     step flagged for review in the final summary (and exit code 3).
 #     Unattended runs have nobody to ask and always skip.
 # ---------------------------------------------------------------------------
-
-# True when a person can be asked a question (same test the other prompts use).
-is_interactive() { [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; }
 
 # Sets NTP_TOOL / NTP_TOOL_SRC / NTP_TOOL_VERSION, or NTP_ERR and returns 1.
 # Does not die: the caller decides whether a missing tool is an error (the
@@ -567,7 +757,7 @@ audit_record() {
         echo "event:        NTP step failed"
         echo "status:       ${decision}"
         echo "host:         $(hostname -f 2>/dev/null || hostname) (${DISTRO_NAME})"
-        echo "run by:       ${SUDO_USER:-$(id -un)} (login: $(logname 2>/dev/null || echo unknown)); admin user: ${ADMIN_USER}"
+        echo "run by:       ${SUDO_USER:-$(id -un)} (login: $(logname 2>/dev/null || echo unknown)); admin user: ${ADMIN_USER:-none (root only)}"
         echo "script:       ${0##*/} ${SCRIPT_VERSION}"
         echo "step:         Time synchronization (NTP)"
         echo "what failed:  ${what}"
@@ -636,18 +826,42 @@ configure_ntp() {
 
     local rc=0 args=() out
 
-    if (( NTP_HAS_SETTINGS )); then
-        # Settings on the command line are the answers: pass them to the
-        # tool's own unattended interface, which validates before touching
-        # anything and reports "RESULT: changed" or "RESULT: unchanged".
-        (( NTP_SOURCES_SET )) && args+=(--sources "$NTP_SOURCES")
+    # The time servers default to NTP-Config's "preferred" set. Settings on
+    # the command line are the answers and are applied as given; with none
+    # given, an interactive run asks first, and an unattended run applies the
+    # default.
+    local sources="${NTP_SOURCES:-preferred}"
+    local apply=1
+    if (( ! NTP_HAS_SETTINGS )) && is_interactive; then
+        apply=0
+        if confirm "Set the time servers to the preferred set (${NTP_PREFERRED_DESC})?" "y"; then
+            apply=1
+        elif confirm "Change the time server configuration yourself (pick a country or region pool, your own servers, allowed subnets, stratum lock)?" "y"; then
+            :   # fall through to the NTP-Config menu below
+        else
+            log_info "Leaving the time configuration as it is."
+            NTP_OUTCOME="unchanged (operator declined)"
+            ntp_cleanup
+            return 0
+        fi
+    fi
+
+    if (( apply )); then
+        # Pass the answers to the tool's own unattended interface, which
+        # validates before touching anything and reports "RESULT: changed"
+        # or "RESULT: unchanged".
+        args+=(--sources "$sources")
         (( NTP_ALLOW_SET )) && args+=(--allow "$NTP_ALLOW")
         (( NTP_STRATUM_SET )) && args+=(--stratum "$NTP_STRATUM")
         if ! resolve_ntp_tool; then
             ntp_failed "could not load the NTP-Config script" 1 "$NTP_ERR"
             return 0
         fi
-        log_info "Applying the NTP settings given on the command line..."
+        if (( NTP_SOURCES_SET )); then
+            log_info "Applying the NTP settings given on the command line..."
+        else
+            log_info "Applying the preferred time servers (the default; pass --ntp-sources or --skip-ntp to change this)..."
+        fi
         out="$(timeout 600 bash "$NTP_TOOL" "${args[@]}" </dev/null 2>&1)" || rc=$?
         printf '%s\n' "$out"
         if (( rc != 0 )); then
@@ -656,21 +870,9 @@ configure_ntp() {
             ntp_failed "configure-ntp-server.sh ${args[*]}" "$rc" "$why"
             return 0
         fi
-        NTP_OUTCOME="configured from command-line settings ($(tail -n1 <<<"$out" | sed 's/^RESULT: //'))"
-        ntp_cleanup
-        return 0
-    fi
-
-    if ! is_interactive; then
-        log_info "No terminal to ask on and no --ntp-* settings given; leaving the time configuration as it is."
-        NTP_OUTCOME="unchanged (unattended, no --ntp-* settings)"
-        ntp_cleanup
-        return 0
-    fi
-
-    if ! confirm "Do you need to change the time server configuration?" "n"; then
-        log_info "Leaving the time configuration as it is."
-        NTP_OUTCOME="unchanged (operator declined)"
+        local how="preferred servers by default"
+        (( NTP_HAS_SETTINGS )) && how="command-line settings"
+        NTP_OUTCOME="configured from ${how} ($(tail -n1 <<<"$out" | sed 's/^RESULT: //'))"
         ntp_cleanup
         return 0
     fi
@@ -888,11 +1090,11 @@ setup_usr_admin_group() {
     log_info "== usr_admin group and /opt permissions =="
 
     if getent group usr_admin >/dev/null 2>&1; then
-        log_info "usr_admin group already exists; ensuring root and ${ADMIN_USER} are members..."
+        log_info "usr_admin group already exists; ensuring ${ADMIN_MEMBERS_TEXT} $([[ -n "$ADMIN_USER" ]] && echo are || echo is) a member..."
     else
         if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
             echo
-            if ! confirm "usr_admin does not exist on this host yet. Create it (GID 3000) and add root + ${ADMIN_USER}?" "y"; then
+            if ! confirm "usr_admin does not exist on this host yet. Create it (GID 3000) and add ${ADMIN_MEMBERS_TEXT}?" "y"; then
                 log_info "Declined - skipping usr_admin group creation, /opt ACLs, and log access for it. Continuing with the rest of setup."
                 return 0
             fi
@@ -902,7 +1104,7 @@ setup_usr_admin_group() {
 
     if [[ -f "$GROUP_MGMT_LOCAL" ]]; then
         log_info "Using local Group-MGMT/create-usr_admin-group.sh..."
-        timeout 300 bash "$GROUP_MGMT_LOCAL" --users "root,${ADMIN_USER}" --yes
+        timeout 300 bash "$GROUP_MGMT_LOCAL" --users "$ADMIN_MEMBERS" --yes
     else
         log_info "Local Group-MGMT script not found (standalone run); fetching from ${GROUP_MGMT_URL}..."
         local tmp
@@ -910,7 +1112,7 @@ setup_usr_admin_group() {
         # shellcheck disable=SC2064
         trap "rm -f '${tmp}'" RETURN
         timeout 30 curl -fsSL "$GROUP_MGMT_URL" -o "$tmp" || die "Failed to fetch create-usr_admin-group.sh from ${GROUP_MGMT_URL}."
-        timeout 300 bash "$tmp" --users "root,${ADMIN_USER}" --yes
+        timeout 300 bash "$tmp" --users "$ADMIN_MEMBERS" --yes
     fi
 
     log_info "Granting usr_admin read/write/execute on /opt (with default ACL for future files)..."
@@ -931,7 +1133,9 @@ setup_usr_admin_group() {
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
+update_operating_system
 install_base_packages
+configure_hostname
 set_timezone
 configure_ntp
 install_cockpit
@@ -949,12 +1153,13 @@ if (( ${#FLAGGED_ITEMS[@]} )); then
 else
     log_info "Server setup complete."
 fi
+echo "  Host name:   $(hostname -f 2>/dev/null || hostname)"
 echo "  Timezone:    $(timedatectl show --property=Timezone --value)"
 echo "  Time sync:   ${NTP_OUTCOME}"
 echo "  Time daemon: $(active_time_daemon), clock synchronized: $(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo unknown)"
 echo "  Cockpit:     https://$(hostname -f 2>/dev/null || hostname):9090"
 if (( USR_ADMIN_CONFIGURED )); then
-    echo "  usr_admin:   root, ${ADMIN_USER}  (GID 3000, rwX on /opt, read access on $LOG_DIR)"
+    echo "  usr_admin:   ${ADMIN_MEMBERS//,/, }  (GID 3000, rwX on /opt, read access on $LOG_DIR)"
 else
     echo "  usr_admin:   not configured (declined when prompted - re-run to set it up later)"
 fi
@@ -965,9 +1170,13 @@ if command -v netplan >/dev/null 2>&1; then
         echo "  netplan:     renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
     fi
 fi
+if reboot_required; then
+    echo
+    log_warn "A reboot is needed to finish applying updates. Reboot this host when it is convenient (for example: sudo reboot)."
+fi
 if [[ "$(active_time_daemon)" == "none detected" ]]; then
     echo
-    log_warn "No active time synchronization daemon was detected on this host. Re-run this script and answer yes to the time server question, or pass --ntp-sources."
+    log_warn "No active time synchronization daemon was detected on this host. Re-run this script and accept the preferred time servers, or pass --ntp-sources."
 fi
 echo
 echo "Re-run this script any time; every step is safe to repeat."

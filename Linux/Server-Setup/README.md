@@ -1,4 +1,4 @@
-README.md v1.4.1 (Last Rev: 2026-09-19)
+README.md v1.5.0 (Last Rev: 2026-10-17)
 
 # Server-Setup
 
@@ -12,14 +12,19 @@ accordingly. Supports Debian-based distros (Debian, Ubuntu, Mint, ...)
 today, with Fedora and RHEL-family distros (RHEL, CentOS, Rocky,
 AlmaLinux) also detected and supported.
 
+- Runs a full operating system update first (`apt full-upgrade`, or `dnf upgrade`), so everything after it installs against current packages. `--skip-os-update` skips it. The final summary tells you if the host needs a reboot afterward.
 - Installs base tooling: `net-tools`, DNS lookup tools (`dnsutils` on
   Debian/Ubuntu, `bind-utils` on Fedora/RHEL), `NetworkManager`, `acl`,
   `unzip`.
+- Offers to change the host name. You enter the full name including the
+  domain in one line (for example `server01.example.com`), or pass
+  `--hostname`. Unattended runs leave the name alone unless `--hostname`
+  is given. See [Host name](#host-name) below.
 - Sets the system timezone (default `America/New_York`, overridable).
-- Shows the current time server configuration and asks whether it needs
-  to change (default: no). If yes, it hands off to
-  `Linux/NTP-Config/configure-ntp-server.sh` so the server gets accurate
-  time sources; if no, setup moves on. See
+- Sets the time servers to the preferred set by default (Cloudflare, the
+  NTP Pool, NIST), through `Linux/NTP-Config/configure-ntp-server.sh`. An
+  interactive run asks first and lets you decline or open NTP-Config's menu
+  to choose something else, such as a pool for your own country. See
   [Time Synchronization](#time-synchronization-ntp) below.
 - Installs and enables Cockpit, opening the firewall for it if a host
   firewall (`firewalld` or `ufw`) is active.
@@ -32,7 +37,7 @@ AlmaLinux) also detected and supported.
 - Enables unattended OS updates (`unattended-upgrades` on Debian/Ubuntu,
   `dnf-automatic` with `apply_updates = yes` on Fedora/RHEL).
 - Creates the `usr_admin` group (GID 3000) and adds `root` plus the
-  admin user you specify, with recursive read/write/execute ACLs on
+  admin user (optional; `root` only if none), with recursive read/write/execute ACLs on
   `/opt` (including a default ACL so new files inherit it). This step
   delegates to `Linux/Group-MGMT/create-usr_admin-group.sh` rather than
   duplicating that logic - see that folder's README for details. If the
@@ -81,7 +86,7 @@ Options for the time synchronization step (see `--help` for all options):
 | Option | Meaning |
 | --- | --- |
 | `--skip-ntp` | Skip the step entirely. |
-| `--ntp-sources V` | Set the time sources without prompting: `native`, `usa`, `preferred`, or a comma separated list of hostnames/IPs. |
+| `--ntp-sources V` | Set the time sources without prompting: `native`, `preferred` (the default), `pool:ZONE` (a country code such as `pool:de`, or a continent such as `pool:europe`), or a comma separated list of hostnames/IPs. |
 | `--ntp-allow CIDRS` | Set the subnets allowed to query this host for time (comma separated), or `none`. Repeatable. |
 | `--ntp-stratum N` | Set the local stratum lock (0-15), or `none`. |
 
@@ -95,7 +100,7 @@ host already matches.
 **1-click install** - downloads the repo and runs the provisioner in one
 command. The user who ran `sudo` is added to `usr_admin` automatically
 (pass `--admin-user` to name someone else; if run directly as root with no
-`--admin-user`, it prompts for the username instead):
+`--admin-user`, it asks, and a blank answer means `root` only):
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)"
@@ -108,11 +113,11 @@ placeholder and must be there):
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)" bootstrap --admin-user jsmith
 ```
 
-Non-interactive (RMM/automation), admin username and confirmation given
-up front:
+Non-interactive (RMM/automation), confirmation given up front (add
+`--admin-user`, `--hostname`, and `--ntp-sources` as needed):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --admin-user jsmith --yes
+curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --yes --hostname web01.example.com
 ```
 
 Do not use `curl ... | sudo bash` without `--yes`. Piping into sudo leaves
@@ -130,9 +135,10 @@ cd Scripts/Linux/Server-Setup
 sudo ./setup-server.sh --admin-user jsmith
 ```
 
-The admin user must already exist on the host - this script does not
-create local user accounts, only the `usr_admin` group and its
-permissions. Create the account first if it doesn't exist yet.
+The admin user is optional. If you name one, it must already exist on the
+host - this script does not create local user accounts, only the
+`usr_admin` group and its permissions. With none, `usr_admin` holds `root`
+only; re-run with `--admin-user NAME` later to add someone.
 
 ## After Install Configuration
 
@@ -142,29 +148,49 @@ Reachable at `https://<host>:9090` once the script completes. If a host
 firewall is active, TCP 9090 was opened automatically; if you add a
 firewall later, allow that port for Cockpit yourself.
 
+### Host name
+
+The step runs after the base packages. It shows the current name, and in an
+interactive run asks **"Do you want to change the host name of this
+server?"** (default: no). If yes, type the full name including the domain in
+one line, for example `server01.example.com`; it is checked (letters, digits
+and hyphens in each part, parts separated by dots) and you are asked again if
+it is not valid. A blank answer keeps the current name. `--hostname FQDN`
+gives the answer up front and is how an unattended run changes it.
+
+The static host name is set to the full name you gave. On Debian/Ubuntu the
+`127.0.1.1` line in `/etc/hosts` is updated to match (a timestamped backup is
+left alongside it) so the new name still resolves locally. Nothing reboots;
+open shell sessions show the new name after the next login.
+
 ### Time Synchronization (NTP)
 
-This step runs right after the timezone, so the clock is right for the TLS
+This step runs right after the timezone and the host name, so the clock is right for the TLS
 and package operations that follow. It first prints the current state: the
 active time daemon, whether the clock is synchronized, and (when chrony is
 installed) NTP-Config's full status report of sources, allowed subnets,
 stratum lock, and `chronyc` output. If chrony is not installed yet, it says
 so and shows what `systemd-timesyncd` is using instead.
 
-Then, in an interactive run, it asks **"Do you need to change the time
-server configuration?"** (default: no).
+Then, in an interactive run, it asks **"Set the time servers to the preferred
+set (time.cloudflare.com, us.pool.ntp.org, time.nist.gov)?"** (default: yes).
 
-- **No:** nothing is changed or installed, and setup moves on.
-- **Yes:** it starts NTP-Config's interactive menu. Installing chrony (if
-  missing), choosing upstream sources, allowed subnets, and a stratum lock
-  all happen there. When you choose Exit with changes still pending, the
+- **Yes:** the preferred set is applied through NTP-Config (installing chrony
+  first if it is missing).
+- **No:** it asks whether you want to change the configuration yourself
+  (default: yes) and, if so, starts NTP-Config's interactive menu. Installing
+  chrony (if missing), choosing upstream sources (OS default, a NTP Pool
+  for any country or region, the preferred set, or your own servers),
+  allowed subnets, and a stratum lock all happen there. Answer no to that
+  too and nothing is changed or installed. When you choose Exit with changes still pending, the
   tool offers to apply them and restart chrony (default yes), restoring its
   backup if chrony rejects the new config.
 
-Unattended runs (`--yes`, or no terminal) have nobody to ask, so by default
-they only show the configuration and leave it as it is. Pass `--ntp-sources`,
-`--ntp-allow`, and/or `--ntp-stratum` to configure it unattended, or
-`--skip-ntp` to leave the step out.
+Unattended runs (`--yes`, or no terminal) have nobody to ask, so they apply
+the preferred set unless `--ntp-sources` names something else (`native`,
+`pool:de`, `pool:europe`, your own servers, ...). `--ntp-allow` and
+`--ntp-stratum` add to it. Pass `--skip-ntp` to leave the time configuration
+alone, for example on a re-run of a host you customized by hand.
 
 `configure-ntp-server.sh` is run from where it is found and is **not
 installed** on the host by this step. Use the sibling copy in the repo
@@ -183,6 +209,16 @@ from, and the last 20 lines of the run log. Unattended runs always skip. A
 skipped NTP step is flagged under "FLAGGED FOR REVIEW" in the final summary
 and the run exits `3` instead of `0`, so an RMM or wrapper can tell a clean
 run from one that needs a look. Re-running the script retries the step.
+
+### Operating system update
+
+The first step. On Debian/Ubuntu it refreshes the package lists and runs
+`apt-get full-upgrade` non-interactively (keeping the local version of any
+configuration file you changed, and waiting for the package lock if cloud-init
+or unattended-upgrades holds it). On Fedora/RHEL it runs `dnf upgrade`. On a
+fresh install this is where most of the run's time goes. Pass
+`--skip-os-update` to leave it out. The host is not rebooted; if updates need
+one, the final summary says so.
 
 ### netplan (Debian/Ubuntu only)
 
@@ -293,3 +329,97 @@ Debian/Ubuntu log-reading convention `Linux/Updates` and
 - **Where's the run log?** - `/var/log/server-setup/setup-<timestamp>.log`,
   one per run, kept 180 days. Readable by root, `usr_admin`, and (where
   present) `adm`; nobody else.
+
+## Release Notes
+
+Newest first. Versions are `setup-server.sh` versions; the full technical
+detail for each is in the changelog at the top of the script. Server-Setup
+runs straight from `main` and is not tagged; the release channels described
+in the top-level README apply to NTP-Config, which this tool calls.
+
+### v1.5.0 (2026-10-17)
+
+Fixes from issue #3, found on Ubuntu Server 2026 LTS.
+
+- The admin user is optional. Without `--admin-user` (and no sudo user to
+  default to) the run no longer stops: a blank answer, or no terminal, means
+  `usr_admin` holds `root` only.
+- New first step: a full operating system update, before anything else is
+  installed. `--skip-os-update` skips it, and the final summary says when the
+  host needs a reboot.
+- New step: offers to change the host name, entered as one full name with the
+  domain (`server01.example.com`), or `--hostname`.
+- The time servers default to the preferred set. Interactive runs ask first
+  and can decline or open NTP-Config's menu; unattended runs apply it unless
+  `--ntp-sources` or `--skip-ntp` says otherwise. Previously `--yes` alone left
+  the time servers untouched.
+- Pairs with NTP-Config v1.8.0, which replaces its USA-only pool choice with a
+  pool for any country or region.
+
+### v1.4.1 (2026-09-19)
+
+- The "Proceed?" dialog is now a numbered plan of the steps in the order
+  they run, tailored to the host: which packages, what the time step will do
+  (including any `--ntp-*` flags), whether a firewall port is opened for
+  Cockpit, whether netplan and dracut apply, and whether `usr_admin` already
+  exists. It also states that nothing reboots the host or applies a network
+  change live.
+
+### v1.4.0 (2026-09-19)
+
+- New time synchronization (NTP) step after the timezone: shows the current
+  time server configuration, asks whether to change it (default: no), and if
+  yes hands off to NTP-Config's menu. Needs NTP-Config `ntp-config-v1.1.0`
+  or later, which makes the menu offer to apply pending changes on exit.
+- New options: `--skip-ntp`, `--ntp-sources`, `--ntp-allow`, `--ntp-stratum`.
+  `--yes` alone only shows the time configuration and changes nothing.
+- If the NTP step fails, you choose to exit or skip it. Either way a record
+  is appended to `/var/log/server-setup/audit.log`. A skipped step is flagged
+  in the final summary and the run exits `3` instead of `0`.
+
+### v1.3.0 (2026-09-19)
+
+- On dracut hosts (Ubuntu 26.04), networking is kept out of the initramfs
+  when netplan is switched to NetworkManager, so the host boots on its static
+  address instead of a leftover DHCP one.
+
+### v1.2.2 (2026-09-18)
+
+- The netplan renderer edit keeps the file's original mode and owner, which
+  stops netplan warning that permissions are too open.
+
+### v1.2.1 (2026-09-18)
+
+- Fixed a hang at the Cockpit install: `timeout` calls now run in the
+  script's own process group so Ctrl+C works.
+
+### v1.2.0 (2026-09-18)
+
+- `--admin-user` defaults to the user who ran `sudo`, so an unattended run
+  can pass `--yes` alone.
+
+### v1.1.2 (2026-09-15)
+
+- Fixed a hang where apt-listchanges or needrestart waited on a prompt
+  nothing could answer.
+
+### v1.1.1 (2026-08-22)
+
+- Creating the `usr_admin` group can be declined without skipping the rest of
+  provisioning.
+
+### v1.1.0 (2026-08-22)
+
+- Every run is logged to `/var/log/server-setup/`, kept 180 days, root-only by
+  default with read access for `usr_admin` and `adm`.
+
+### v1.0.1 (2026-08-10)
+
+- Failures inside functions now stop the run; remaining external calls have
+  timeouts; fixed a case where the netplan renderer edit could report success
+  without making the change.
+
+### v1.0.0 (2026-08-09)
+
+- Initial release: base packages, timezone, Cockpit, netplan renderer,
+  unattended updates, and the `usr_admin` group with ACLs on `/opt`.

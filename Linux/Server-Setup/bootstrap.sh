@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 #
 # bootstrap.sh
-# 2026-09-18
-# Version: v1.0.1
+# 2026-10-17
+# Version: v1.0.2
 #
 # CHANGELOG:
+#   v1.0.2 - Wording only: setup-server.sh no longer requires an admin user,
+#            so the no-terminal message and the usage notes now say
+#            --yes alone is enough for an unattended run.
 #   v1.0.1 - Documented `sudo bash -c "$(curl ...)"` as the interactive
 #            form. Piping into sudo (`curl | sudo bash`) leaves the script
 #            outside its pty's foreground process group on newer sudo
@@ -17,16 +20,16 @@
 # whole Scripts repo to a temp directory and hands off to this folder's
 # setup-server.sh, so the tool can be run with a single curl command
 # instead of a manual clone/cd sequence. setup-server.sh is still fully
-# interactive if --admin-user is omitted; this script only fetches it
+# interactive unless --yes is given; this script only fetches it
 # and reattaches the terminal so its prompts work. Any arguments given
 # to this script are passed straight through to setup-server.sh.
 #
-# Usage (interactive - prompts for the admin username):
+# Usage (interactive - asks about the admin user, host name and time servers):
 #   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)"
 #   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh)" bootstrap --admin-user jsmith
 #
 # Usage (unattended - must pass --yes so nothing prompts; --admin-user is
-# optional and defaults to the invoking sudo user):
+# optional and defaults to the invoking sudo user, or root only):
 #   curl -fsSL https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --admin-user jsmith --yes
 
 set -euo pipefail
@@ -44,8 +47,8 @@ for cmd in curl tar mktemp; do
 done
 
 if [[ ! -e /dev/tty ]]; then
-    echo "No controlling terminal (/dev/tty) available; setup-server.sh needs one for its interactive prompts unless --admin-user and --yes are both given." >&2
-    echo "Run this from an interactive shell, or pass --admin-user NAME --yes, or clone the repo and run ./setup-server.sh directly." >&2
+    echo "No controlling terminal (/dev/tty) available; setup-server.sh needs one for its interactive prompts unless --yes is given." >&2
+    echo "Run this from an interactive shell, or pass --yes, or clone the repo and run ./setup-server.sh directly." >&2
     exit 1
 fi
 
