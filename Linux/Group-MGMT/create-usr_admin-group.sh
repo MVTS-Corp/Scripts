@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # create-usr_admin-group.sh
-# 2026-08-05
-# Version: v1.0.0
+# 2026-10-17
+# Version: v1.0.1
 #
 # PURPOSE:
 # Creates the usr_admin group at a fixed GID (default 3000), verifying the
@@ -10,6 +10,13 @@
 # one. Optionally adds one or more existing local users to the group,
 # either interactively (numbered prompt) or unattended via --users for
 # RMM / orchestration use.
+#
+# CHANGELOG:
+#   v1.0.1 - An explicit --users list is no longer skipped when the host has
+#            no accounts with UID >= 1000. The "no human accounts" early exit
+#            ran before --users was read, so --users root (what Server-Setup
+#            passes) silently added nobody on a host with only system
+#            accounts, yet reported success.
 
 set -euo pipefail
 
@@ -124,17 +131,19 @@ mapfile -t candidate_users < <(
         '($3 >= min) && ($3 != 65534) {print $1}' /etc/passwd | sort
 )
 
-if (( ${#candidate_users[@]} == 0 )); then
-    echo "No local human user accounts (UID >= ${MIN_HUMAN_UID}) were found. Nothing to add. Done."
-    exit 0
-fi
-
 # --- resolve which users to add ---------------------------------------------
 declare -a target_users=()
 
 if [[ -n "${USERS_ARG}" ]]; then
     IFS=',' read -r -a target_users <<< "${USERS_ARG}"
 elif [[ -t 0 ]]; then
+    # Only the interactive picker depends on this list; an explicit --users
+    # (for example root, which is below MIN_HUMAN_UID) must never be skipped
+    # just because no regular accounts exist yet.
+    if (( ${#candidate_users[@]} == 0 )); then
+        echo "No local human user accounts (UID >= ${MIN_HUMAN_UID}) were found. Nothing to pick from. Done."
+        exit 0
+    fi
     echo ""
     echo "Local human user accounts on this system:"
     for i in "${!candidate_users[@]}"; do

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # install.sh
-# 2026-08-22
-# Version: v1.0.4
+# 2026-10-17
+# Version: v1.0.5
 #
 # PURPOSE:
 # Interactive installer for linux-notifications: installs and configures
@@ -12,6 +12,11 @@
 # settings or default recipient.
 #
 # CHANGELOG:
+#   v1.0.5 - Export DEBIAN_FRONTEND=noninteractive and NEEDRESTART_MODE=a up
+#            front. With a terminal attached, needrestart pops a dialog
+#            during apt-get and the installer hangs (the same failure
+#            Server-Setup v1.1.2 fixed); only the msmtp install line had
+#            DEBIAN_FRONTEND, and apt-get update had neither.
 #   v1.0.4 - LOG_DIR is now explicitly locked to root:root, mode 750 (plus
 #            the "adm" group, if present, matching the usual Debian/Ubuntu
 #            log-reading convention) instead of being left at whatever
@@ -42,6 +47,12 @@
 #            correctly either way).
 
 set -Eeuo pipefail
+
+# Keep apt, debconf and needrestart from opening a dialog nothing can answer
+# (same hang Server-Setup v1.1.2 fixed: an attached terminal makes needrestart
+# prompt for services to restart).
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/linux-notifications"

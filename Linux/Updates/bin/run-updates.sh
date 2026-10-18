@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # run-updates.sh
-# 2026-08-22
-# Version: v1.1.0
+# 2026-10-17
+# Version: v1.1.1
 #
 # PURPOSE:
 # Runs OS package updates and emails a summary. Deployed to
@@ -10,6 +10,13 @@
 # /etc/cron.d/linux-updates. Safe to run manually for testing.
 #
 # CHANGELOG:
+#   v1.1.1 - "All updates" mode now runs apt-get full-upgrade instead of
+#            upgrade. Plain upgrade never installs a package that needs a
+#            new dependency or removes one, so on Ubuntu the kernel
+#            metapackages (and anything else that pulls in a new package)
+#            were reported as "kept back" and never installed, while the
+#            run still reported SUCCESS. The security-only dry run uses
+#            full-upgrade too, so it lists the same set.
 #   v1.1.0 - Logging (mkdir + LOG_FILE) now starts before any precondition
 #            check, instead of after config/distro checks - a setup
 #            failure (missing config, unsupported/undetected distro)
@@ -135,7 +142,7 @@ run_debian_update() {
                 ' | grep -qi 'security'; then
                 upgradable="$upgradable $pkg"
             fi
-        done < <(timeout "$APT_NETWORK_TIMEOUT" apt-get --just-print upgrade 2>/dev/null | awk '/^Inst/ {print $2}')
+        done < <(timeout "$APT_NETWORK_TIMEOUT" apt-get --just-print full-upgrade 2>/dev/null | awk '/^Inst/ {print $2}')
 
         if [[ -n "$upgradable" ]]; then
             # shellcheck disable=SC2086
@@ -144,7 +151,7 @@ run_debian_update() {
             log_info "No security updates available"
         fi
     else
-        timeout "$APT_INSTALL_TIMEOUT" apt-get upgrade -y "${APT_CONF_OPTS[@]}"
+        timeout "$APT_INSTALL_TIMEOUT" apt-get full-upgrade -y "${APT_CONF_OPTS[@]}"
     fi
     local status=$?
     timeout "$APT_NETWORK_TIMEOUT" apt-get autoremove -y || true
