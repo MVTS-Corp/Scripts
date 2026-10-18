@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-10-17
-# Version: v1.6.0
+# 2026-10-18
+# Version: v1.7.0
 #
 # CHANGELOG:
+#   v1.7.0 - Fixes and a production tool baseline:
+#            * usr_admin: an interactive run now shows who is in the group
+#              and lets the operator add other local users to it (names, or
+#              all), or carry on as is. --usr-admin-user names more members
+#              up front. Previously only root and the admin user were ever
+#              added, with no way to add anyone else during setup.
+#            * curl is installed first when missing (some minimal images
+#              ship without it) instead of stopping at pre-flight.
+#            * Base packages are now the essentials a daily-use production
+#              server needs (curl, ca-certificates, sudo, tar, unzip,
+#              openssh-server, acl, net-tools, DNS tools, NetworkManager,
+#              iproute, procps) plus best-effort admin tools (wget, vim,
+#              nano, less, htop, tmux, git, rsync, jq, lsof, psmisc, ping,
+#              traceroute, mtr, tcpdump, pciutils, bash-completion, man
+#              pages, logrotate, smartmontools on real hardware).
+#              Essentials must install; an extra a repo lacks is skipped
+#              with a note. A newly installed SSH server is started; an
+#              existing one is left as the admin set it.
+#              --skip-extra-tools installs only the essentials.
 #   v1.6.0 - Security and operations baselines, each its own step with a
 #            --skip-* flag:
 #            * Firewall: hands off to Linux/Firewall-Config/
@@ -204,8 +223,18 @@ NOTIFICATIONS_LOCAL="${SCRIPT_DIR}/../Notifications/install.sh"
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.6.0"
+SCRIPT_VERSION="v1.7.0"
 
+# Package sets for a daily-use production server. The essentials must install
+# (the run stops if they cannot); the extras are best effort, since a repo may
+# not carry every one (htop and a few others need EPEL on RHEL-family hosts).
+BASE_ESSENTIAL_DEB=(ca-certificates curl sudo tar unzip acl net-tools dnsutils network-manager iproute2 procps openssh-server)
+BASE_ESSENTIAL_RPM=(ca-certificates curl sudo tar unzip acl net-tools bind-utils NetworkManager iproute procps-ng openssh-server)
+BASE_EXTRA_DEB=(wget gnupg zip bzip2 xz-utils vim nano less htop tmux git rsync jq lsof psmisc iputils-ping traceroute mtr-tiny tcpdump pciutils bash-completion man-db logrotate)
+BASE_EXTRA_RPM=(wget gnupg2 zip bzip2 xz vim-enhanced nano less htop tmux git rsync jq lsof psmisc iputils traceroute mtr tcpdump pciutils bash-completion man-db logrotate)
+
+EXTRA_ADMINS=()
+SKIP_EXTRA_TOOLS=0
 MGMT_SUBNET=""
 ALLOW_PORTS=()
 UPDATES_MODE=""
@@ -273,7 +302,13 @@ Usage: sudo ${0##*/} [--admin-user NAME] [--hostname FQDN] [--timezone TZ] [--ye
                      creation if it doesn't already exist. The time servers
                      are then set to the preferred set unless --ntp-sources
                      or --skip-ntp says otherwise.
+  --usr-admin-user NAMES
+                     More existing local users to add to usr_admin (comma
+                     separated; repeatable). An interactive run also asks
+                     whether to add others.
   --skip-os-update   Skip the full operating system update that runs first.
+  --skip-extra-tools Install only the essential packages, not the usual
+                     admin tools (htop, tmux, git, vim, ...).
   --mgmt-subnet CIDRS
                      Management subnet(s), comma separated. SSH and Cockpit
                      are then reachable only from there, and fail2ban never
@@ -333,6 +368,12 @@ while [[ $# -gt 0 ]]; do
             TIMEZONE="$2"; shift 2 ;;
         --skip-os-update)
             SKIP_OS_UPDATE=1; shift ;;
+        --skip-extra-tools)
+            SKIP_EXTRA_TOOLS=1; shift ;;
+        --usr-admin-user)
+            [[ $# -ge 2 ]] || { echo "ERROR: --usr-admin-user requires a value." >&2; exit 1; }
+            for _name in ${2//,/ }; do EXTRA_ADMINS+=("$_name"); done
+            shift 2 ;;
         --mgmt-subnet)
             [[ $# -ge 2 ]] || { echo "ERROR: --mgmt-subnet requires a value." >&2; exit 1; }
             MGMT_SUBNET="${MGMT_SUBNET:+${MGMT_SUBNET},}$2"; shift 2 ;;
@@ -403,6 +444,24 @@ NTP_HAS_SETTINGS=$(( NTP_SOURCES_SET || NTP_ALLOW_SET || NTP_STRATUM_SET ))
 
 # True when a person can be asked a question (same test the other prompts use).
 is_interactive() { [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; }
+
+# Everyone who ends up in usr_admin besides root: the admin user plus any
+# extras (--usr-admin-user, or named at the prompt). Sets ADMIN_MEMBERS (comma
+# separated, root first) and ADMIN_MEMBERS_TEXT (for messages), de-duplicated.
+refresh_admin_members() {
+    local u list=("root") text seen=" root "
+    for u in "$ADMIN_USER" ${EXTRA_ADMINS[@]+"${EXTRA_ADMINS[@]}"}; do
+        [[ -n "$u" && "$seen" != *" ${u} "* ]] || continue
+        list+=("$u"); seen+="${u} "
+    done
+    ADMIN_MEMBERS="$(IFS=,; echo "${list[*]}")"
+    case ${#list[@]} in
+        1) text="root" ;;
+        2) text="root and ${list[1]}" ;;
+        *) text="$(IFS=,; echo "${list[*]:0:${#list[@]}-1}" | sed 's/,/, /g'), and ${list[${#list[@]}-1]}" ;;
+    esac
+    ADMIN_MEMBERS_TEXT="$text"
+}
 
 # valid_cidr CIDR - IPv4 or IPv6. The firewall tool does the strict check; this
 # catches typos before anything on the host is touched.
@@ -523,9 +582,32 @@ if [[ -z "$PKG_MANAGER" ]]; then
 fi
 log_info "Detected: $DISTRO_NAME  (family=$DISTRO_FAMILY, package manager=$PKG_MANAGER)"
 
-for cmd in timedatectl systemctl awk id curl; do
+for cmd in timedatectl systemctl awk id; do
     command -v "$cmd" >/dev/null 2>&1 || die "Missing required command: ${cmd}. This is not a standard Linux environment."
 done
+
+# curl is used to fetch sibling tools and is missing from some minimal
+# installs. Everything else this script needs comes with the base system, so
+# curl is the one thing installed here, before the "Proceed?" prompt, rather
+# than stopping. (--check only reports it.)
+if ! command -v curl >/dev/null 2>&1; then
+    if (( CHECK_ONLY )); then
+        log_warn "curl is not installed. A real run installs it first."
+    else
+        log_info "curl is not installed; installing it (with ca-certificates) before anything else..."
+        case "$DISTRO_FAMILY" in
+            debian)
+                timeout 300 apt-get -o DPkg::Lock::Timeout=180 update -y
+                timeout 300 apt-get -o DPkg::Lock::Timeout=180 install -y ca-certificates curl
+                ;;
+            fedora|rhel)
+                timeout 300 "$PKG_MANAGER" install -y ca-certificates curl
+                ;;
+        esac
+        command -v curl >/dev/null 2>&1 || die "Installed curl but the 'curl' command still cannot be found. Install it by hand and re-run."
+        log_info "curl installed."
+    fi
+fi
 
 # No --admin-user given: default to the person who ran sudo, since that is
 # almost always the account being set up. Not used when SUDO_USER is unset
@@ -551,8 +633,11 @@ if [[ -z "$ADMIN_USER" && "$CHECK_ONLY" -ne 1 ]]; then
     log_info "No admin user given; the usr_admin group will hold root only (pass --admin-user NAME to add someone)."
 fi
 # What goes into usr_admin, as a comma separated list and as prose.
-ADMIN_MEMBERS="root${ADMIN_USER:+,${ADMIN_USER}}"
-ADMIN_MEMBERS_TEXT="root${ADMIN_USER:+ and ${ADMIN_USER}}"
+# Extra members named with --usr-admin-user must exist too.
+for _u in ${EXTRA_ADMINS[@]+"${EXTRA_ADMINS[@]}"}; do
+    id -u "$_u" >/dev/null 2>&1 || die "User '${_u}' (from --usr-admin-user) does not exist on this system. Create the account first, then re-run."
+done
+refresh_admin_members
 
 if (( CHECK_ONLY )); then
     log_info "Checks passed. --check specified, exiting without making changes."
@@ -570,14 +655,16 @@ plan_step() {   # plan_step N "Title" "what it does"
 }
 
 print_provisioning_plan() {
-    local pkgs updates ntp cockpit_fw netplan_txt usr_admin_txt
+    local pkgs pkgs_extra updates ntp cockpit_fw netplan_txt usr_admin_txt
     local netplan_files=(/etc/netplan/*.yaml)
 
     if [[ "$DISTRO_FAMILY" == "debian" ]]; then
-        pkgs="net-tools, dnsutils, network-manager, acl, unzip"
+        pkgs="${BASE_ESSENTIAL_DEB[*]}"
+        pkgs_extra="${BASE_EXTRA_DEB[*]}"
         updates="Install and enable unattended-upgrades (with apt-listchanges) so security and OS updates apply automatically."
     else
-        pkgs="net-tools, bind-utils, NetworkManager, acl, unzip"
+        pkgs="${BASE_ESSENTIAL_RPM[*]}"
+        pkgs_extra="${BASE_EXTRA_RPM[*]}"
         updates="Install and enable dnf-automatic with apply_updates = yes so OS updates apply automatically."
     fi
 
@@ -631,7 +718,7 @@ print_provisioning_plan() {
     fi
 
     local members="$ADMIN_MEMBERS_TEXT" member_verb="are members"
-    if [[ -z "$ADMIN_USER" ]]; then
+    if [[ "$ADMIN_MEMBERS" == "root" ]]; then
         member_verb="is a member"
     fi
 
@@ -639,6 +726,9 @@ print_provisioning_plan() {
         usr_admin_txt="The usr_admin group already exists. Make sure ${members} ${member_verb}, and (re)apply its read/write/execute ACLs on /opt (recursive, plus a default ACL so new files inherit it) and read access to the logs in ${LOG_DIR}."
     else
         usr_admin_txt="Create the usr_admin group (GID 3000); you will be asked to confirm this step separately, and declining skips only this step. Add ${members} to it, give it read/write/execute ACLs on /opt (recursive, plus a default ACL so new files inherit it) and read access to the logs in ${LOG_DIR}."
+    fi
+    if is_interactive; then
+        usr_admin_txt+=" You are also asked whether to add other local users to it."
     fi
 
     echo
@@ -715,7 +805,11 @@ print_provisioning_plan() {
     if (( ! SKIP_FIREWALL )); then cockpit_fw="Its port is handled in the firewall step."; fi
 
     plan_step 1 "Operating system update" "$os_update"
-    plan_step 2 "Base packages" "Install ${pkgs}."
+    if (( SKIP_EXTRA_TOOLS )); then
+        plan_step 2 "Base packages" "Install the essentials: ${pkgs}. A new SSH server is started; one already installed is left as it is. Extra admin tools are skipped (--skip-extra-tools)."
+    else
+        plan_step 2 "Base packages" "Install the essentials: ${pkgs}. A new SSH server is started; one already installed is left as it is. Then the usual admin tools, best effort (any a repository does not carry is skipped): ${pkgs_extra}$(command -v systemd-detect-virt >/dev/null 2>&1 && ! systemd-detect-virt --quiet 2>/dev/null && echo ", smartmontools")."
+    fi
     plan_step 3 "Host name" "$host_txt"
     plan_step 4 "Timezone" "Set the system timezone to ${TIMEZONE}."
     plan_step 5 "Firewall" "$fw_txt"
@@ -784,20 +878,58 @@ reboot_required() {
 # ---------------------------------------------------------------------------
 install_base_packages() {
     log_info "== Base packages =="
+    local essential=() extra=() p missing=() had_sshd=0
+    command -v sshd >/dev/null 2>&1 && had_sshd=1
     case "$DISTRO_FAMILY" in
         debian)
-            timeout 300 apt-get update -y
-            timeout 300 apt-get install -y net-tools dnsutils network-manager acl unzip
+            timeout 300 apt-get -o DPkg::Lock::Timeout=180 update -y
+            essential=("${BASE_ESSENTIAL_DEB[@]}"); extra=("${BASE_EXTRA_DEB[@]}")
             ;;
         fedora|rhel)
-            timeout 300 "$PKG_MANAGER" install -y net-tools bind-utils NetworkManager acl unzip
+            essential=("${BASE_ESSENTIAL_RPM[@]}"); extra=("${BASE_EXTRA_RPM[@]}")
             ;;
     esac
-    for cmd in setfacl nmcli unzip; do
-        command -v "$cmd" >/dev/null 2>&1 || die "Base package install did not provide the expected command: ${cmd}."
+
+    log_info "Installing essential packages: ${essential[*]}"
+    pkg_install "${essential[@]}" || die "Could not install the essential packages (${essential[*]}). Check the package manager output above and the host's repositories, then re-run."
+    # Never trust the package manager's exit code alone.
+    for p in curl tar unzip sudo setfacl nmcli ps ss; do
+        command -v "$p" >/dev/null 2>&1 || die "Base package install did not provide the expected command: ${p}."
     done
+    command -v sshd >/dev/null 2>&1 || [[ -x /usr/sbin/sshd ]] || die "openssh-server installed but sshd was not found."
+
+    # A newly installed SSH server is switched on so the host can be managed
+    # remotely. One that was already there is left exactly as the admin set it
+    # (they may have disabled it on purpose).
+    if (( ! had_sshd )); then
+        local unit="sshd"
+        [[ "$DISTRO_FAMILY" == "debian" ]] && unit="ssh"
+        timeout 60 systemctl enable --now "$unit" >/dev/null 2>&1 \
+            && log_info "SSH server installed and started (${unit})." \
+            || log_warn "SSH server installed but ${unit} could not be started; check 'systemctl status ${unit}'."
+    fi
+
+    if (( SKIP_EXTRA_TOOLS )); then
+        log_info "Skipping the extra admin tools (--skip-extra-tools)."
+    else
+        # Disk health tools only make sense on real hardware.
+        if command -v systemd-detect-virt >/dev/null 2>&1 && ! systemd-detect-virt --quiet 2>/dev/null; then
+            extra+=(smartmontools)
+        fi
+        log_info "Installing admin tools: ${extra[*]}"
+        if ! pkg_install "${extra[@]}"; then
+            log_warn "Installing the admin tools together failed; retrying one at a time so one missing package does not block the rest."
+            for p in "${extra[@]}"; do
+                pkg_install "$p" >/dev/null 2>&1 || missing+=("$p")
+            done
+            if (( ${#missing[@]} )); then
+                log_warn "Not available from this host's repositories, skipped: ${missing[*]}"
+            fi
+        fi
+    fi
     log_info "Base packages installed and verified."
 }
+
 
 # ---------------------------------------------------------------------------
 # 1a. Host name. The name is set as one full name including the domain (the
@@ -1309,11 +1441,60 @@ configure_unattended_updates() {
 # ---------------------------------------------------------------------------
 USR_ADMIN_CONFIGURED=0
 
+# Interactive only: shows who is in usr_admin and which other local users
+# could be, and lets the operator add more of them or carry on as is. Names
+# are checked against the system before anything is changed; a bad name is
+# asked about again rather than skipped. Whatever is chosen is merged with the
+# admin user and --usr-admin-user into ADMIN_MEMBERS.
+offer_extra_admin_members() {
+    is_interactive || return 0
+
+    local current="" line u cands=() ans tok picked ok
+    current="$(getent group usr_admin 2>/dev/null | cut -d: -f4 || true)"
+    while IFS= read -r line; do
+        u="${line%%:*}"
+        [[ " ${ADMIN_MEMBERS//,/ } " == *" ${u} "* ]] && continue
+        [[ ",${current}," == *",${u},"* ]] && continue
+        cands+=("$u")
+    done < <(awk -F: '($3 >= 1000) && ($3 != 65534) { print }' /etc/passwd | sort)
+
+    echo
+    echo "usr_admin will contain: ${ADMIN_MEMBERS//,/, }${current:+ (already in the group: ${current//,/, })}"
+    if (( ${#cands[@]} )); then
+        echo "Other local users on this host: ${cands[*]}"
+    else
+        echo "There are no other local user accounts on this host to add."
+    fi
+    while :; do
+        ans="$(ask "Add other users to usr_admin? Enter usernames (comma or space separated), 'all', or press Enter to continue as is")"
+        ans="${ans//,/ }"
+        [[ -z "${ans// /}" ]] && return 0
+        picked=(); ok=1
+        if [[ "${ans,,}" == "all" ]]; then
+            picked=(${cands[@]+"${cands[@]}"})
+        else
+            for tok in $ans; do
+                if id -u "$tok" >/dev/null 2>&1; then
+                    picked+=("$tok")
+                else
+                    echo "No such user: ${tok}. Nothing was added; try again, or press Enter to continue as is."
+                    ok=0
+                fi
+            done
+        fi
+        (( ok )) || continue
+        EXTRA_ADMINS+=(${picked[@]+"${picked[@]}"})
+        refresh_admin_members
+        log_info "usr_admin will now contain: ${ADMIN_MEMBERS//,/, }"
+        return 0
+    done
+}
+
 setup_usr_admin_group() {
     log_info "== usr_admin group and /opt permissions =="
 
     if getent group usr_admin >/dev/null 2>&1; then
-        log_info "usr_admin group already exists; ensuring ${ADMIN_MEMBERS_TEXT} $([[ -n "$ADMIN_USER" ]] && echo are || echo is) a member..."
+        log_info "usr_admin group already exists; ensuring ${ADMIN_MEMBERS_TEXT} $([[ "$ADMIN_MEMBERS" == "root" ]] && echo is || echo are) in it..."
     else
         if [[ "$ASSUME_YES" -ne 1 && -t 0 ]]; then
             echo
@@ -1324,6 +1505,8 @@ setup_usr_admin_group() {
         fi
         log_info "Creating usr_admin group..."
     fi
+
+    offer_extra_admin_members
 
     if [[ -f "$GROUP_MGMT_LOCAL" ]]; then
         log_info "Using local Group-MGMT/create-usr_admin-group.sh..."

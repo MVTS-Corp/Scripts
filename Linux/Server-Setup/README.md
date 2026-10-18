@@ -1,4 +1,4 @@
-README.md v1.6.0 (Last Rev: 2026-10-17)
+README.md v1.7.0 (Last Rev: 2026-10-18)
 
 # Server-Setup
 
@@ -13,9 +13,18 @@ today, with Fedora and RHEL-family distros (RHEL, CentOS, Rocky,
 AlmaLinux) also detected and supported.
 
 - Runs a full operating system update first (`apt full-upgrade`, or `dnf upgrade`), so everything after it installs against current packages. `--skip-os-update` skips it. The final summary tells you if the host needs a reboot afterward.
-- Installs base tooling: `net-tools`, DNS lookup tools (`dnsutils` on
-  Debian/Ubuntu, `bind-utils` on Fedora/RHEL), `NetworkManager`, `acl`,
-  `unzip`.
+- Installs what a daily-use production server needs, including `curl` itself
+  (some minimal images ship without it, so it is installed first). The
+  essentials must install: `curl`, `ca-certificates`, `sudo`, `tar`, `unzip`,
+  `openssh-server`, `acl`, `net-tools`, DNS lookup tools (`dnsutils` or
+  `bind-utils`), `NetworkManager`, `iproute`, `procps`. A newly installed SSH
+  server is started; one already there is left as the admin set it. Then the
+  usual admin tools, best effort (one a repository lacks is skipped with a
+  note): `wget`, `gnupg`, `zip`, `bzip2`, `xz`, `vim`, `nano`, `less`, `htop`,
+  `tmux`, `git`, `rsync`, `jq`, `lsof`, `psmisc`, `ping`, `traceroute`, `mtr`,
+  `tcpdump`, `pciutils`, bash completion, man pages, `logrotate`, and
+  `smartmontools` on real hardware. `--skip-extra-tools` installs only the
+  essentials.
 - Offers to change the host name. You enter the full name including the
   domain in one line (for example `server01.example.com`), or pass
   `--hostname`. Unattended runs leave the name alone unless `--hostname`
@@ -50,7 +59,9 @@ AlmaLinux) also detected and supported.
   specifically (separate from the one overall "Proceed?" prompt);
   declining skips just this step - every other part of provisioning
   still runs. If the group already exists, no prompt is shown and
-  membership is just ensured, since nothing new is being created.
+  membership is just ensured, since nothing new is being created. An interactive run then shows who is in the group and which other local
+  users exist, and asks whether to add more of them (usernames, or `all`) or
+  carry on as is; `--usr-admin-user NAMES` gives them up front.
 - Logs every run to a file, not just the terminal, so a failure during
   an unattended/RMM invocation still leaves a record. The log directory
   is root-only (mode 750) by default; `usr_admin` (once created, above)
@@ -132,6 +143,13 @@ the script outside its terminal's foreground process group on newer sudo
 (seen on Ubuntu 26.04), so any prompt hangs or is refused. With `--yes`
 nothing ever prompts (the admin user comes from `--admin-user`, or from
 the invoking sudo user), so the pipe form is safe there.
+
+On a host without `curl`, use `wget` for the one-liner instead (the
+installer then installs `curl` itself):
+
+```bash
+wget -qO- https://raw.githubusercontent.com/MVTS-Corp/Scripts/main/Linux/Server-Setup/bootstrap.sh | sudo bash -s -- --yes
+```
 
 If you'd rather inspect the code before running it as root, clone and
 run manually instead:
@@ -395,6 +413,19 @@ Newest first. Versions are `setup-server.sh` versions; the full technical
 detail for each is in the changelog at the top of the script. Server-Setup
 runs straight from `main` and is not tagged; the release channels described
 in the top-level README apply to NTP-Config, which this tool calls.
+
+### v1.7.0 (2026-10-18)
+
+- `usr_admin`: an interactive run asks whether to add other local users to the
+  group (or carry on as is); `--usr-admin-user` does it unattended. Before, only
+  root and the admin user were ever added.
+- `curl` is installed first when the host lacks it, instead of stopping. The
+  four `bootstrap.sh` installers (Server-Setup, NTP-Config, Updates,
+  Notifications) also install `curl` and `tar` themselves.
+- Base packages are now a production baseline: essentials that must install
+  (including `sudo` and `openssh-server`) plus best-effort admin tools (`htop`,
+  `tmux`, `git`, `vim`, `rsync`, `jq`, ...). `--skip-extra-tools` keeps it to the
+  essentials.
 
 ### v1.6.0 (2026-10-17)
 
