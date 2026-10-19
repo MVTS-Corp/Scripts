@@ -1,0 +1,14 @@
+# /opt/Compose-Common/cloudflared.yaml
+# Shared cloudflared service definition. Every tunnel project extends this.
+# The image tag below is the ONLY place the cloudflared version is set, and
+# the line server-maintenance edits (IMAGE_cloudflared_FILE points here).
+# --no-autoupdate: versions change only through server-maintenance.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.1
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    networks: [web]
+    mem_limit: 128m

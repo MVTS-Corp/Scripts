@@ -1,0 +1,13 @@
+# server-maintenance-check.service
+# Installed by Linux/Server-Maintenance/install.sh. Read-only daily check.
+[Unit]
+Description=server-maintenance daily check (read-only)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-maintenance check
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle

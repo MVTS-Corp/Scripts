@@ -1,0 +1,13 @@
+# /opt/Cloudflared-<Name>/compose.yaml
+# One directory per Cloudflare account/tunnel, each with its own root-only
+# .env (TUNNEL_TOKEN=...). Only container_name differs between copies.
+services:
+  cloudflared:
+    extends:
+      file: /opt/Compose-Common/cloudflared.yaml
+      service: cloudflared
+    container_name: cloudflared-CHANGE-ME
+
+networks:
+  web:
+    external: true

@@ -1,4 +1,4 @@
-README.md v1.4.0 (Last Rev: 2026-10-17)
+README.md v1.5.0 (Last Rev: 2026-10-18)
 
 ## Overview
 
@@ -23,6 +23,10 @@ self-contained tool with its own README.
 - **Notifications/** - installs and configures an SMTP relay (via `msmtp`)
   so a host can send alert emails, independent of any other tool. See
   `Notifications/README.md`.
+- **Server-Maintenance/** - scheduled maintenance for servers on premises or
+  in the cloud: OS updates, container image updates with a soak period,
+  approval, health checks and rollback, controlled reboots with a post-boot
+  check, alerts and Uptime Kuma heartbeats. See `Server-Maintenance/README.md`.
 - **Server-Setup/** - baseline provisioning for a freshly installed
   server (OS update, packages, host name, timezone, firewall, time
   synchronization via NTP-Config, Cockpit, SSH hardening, fail2ban, journald,

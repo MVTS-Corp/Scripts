@@ -1,0 +1,15 @@
+# server-maintenance-run.timer
+# Installed by Linux/Server-Maintenance/install.sh. OnCalendar is filled in
+# from the installer's answer. Persistent=false on purpose: a window missed
+# while the host was off must not start updates and a reboot at a random
+# time after boot; the next window picks the work up instead.
+[Unit]
+Description=server-maintenance maintenance window
+
+[Timer]
+OnCalendar=@RUN_CALENDAR@
+RandomizedDelaySec=@RUN_RANDOM_DELAY@
+Persistent=false
+
+[Install]
+WantedBy=timers.target

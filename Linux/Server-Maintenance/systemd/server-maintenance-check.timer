@@ -1,0 +1,13 @@
+# server-maintenance-check.timer
+# Installed by Linux/Server-Maintenance/install.sh. OnCalendar is filled in
+# from the installer's answer. Persistent=true runs a missed check at boot.
+[Unit]
+Description=server-maintenance daily check
+
+[Timer]
+OnCalendar=@CHECK_CALENDAR@
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

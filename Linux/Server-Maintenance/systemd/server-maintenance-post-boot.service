@@ -1,0 +1,16 @@
+# server-maintenance-post-boot.service
+# Installed by Linux/Server-Maintenance/install.sh. At every boot; exits at
+# once unless a reboot started by server-maintenance is waiting to be
+# verified.
+[Unit]
+Description=server-maintenance post-boot verification
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-maintenance post-boot
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,230 @@
+# config.conf.example
+# 2026-10-18
+# Version: v1.0.0
+#
+# PURPOSE:
+# Template for /etc/server-maintenance/config.conf. install.sh copies this
+# file into place on first install and fills in the answers it prompts for.
+# Every other key can be edited by hand afterwards. Run
+#   sudo server-maintenance validate
+# after any hand edit to check the result.
+#
+# The installed copy is root-owned, mode 600, and is refused if it is
+# writable by anyone other than root (it is sourced by a root process, and
+# it holds the heartbeat URLs, which work like passwords).
+#
+# Nothing host-specific belongs in this example. Hostnames, URLs, and paths
+# for a real host go only in the installed copy.
+
+# ===========================================================================
+# General
+# ===========================================================================
+
+# Optional comma-separated recipient(s) passed to `send-alert -t`. Leave
+# empty to use the default recipient configured by Linux/Notifications.
+ALERT_TO=""
+
+# Per-run logs live in /var/log/server-maintenance/. Files older than this
+# many days are deleted at the end of each run.
+LOG_RETENTION_DAYS=30
+
+# Optional extra group granted read access to the log directory (POSIX
+# ACL). The "adm" group is always granted read access when it exists.
+LOG_ACCESS_GROUP=""
+
+# Pre-flight for `run`: refuse to start when the root filesystem (or
+# /var/lib/docker, when Docker is in use) has less free space than this.
+MIN_FREE_DISK_PERCENT=10
+
+# Pre-flight for `run`: wait (up to LOAD_WAIT_SECONDS) while the 1-minute
+# load average per CPU core is above this value, then give up.
+MAX_LOAD_PER_CORE=2.0
+LOAD_WAIT_SECONDS=600
+
+# Uptime Kuma push monitor URLs (heartbeats). Each job pings its URL only
+# after it finished successfully, and pings status=down on failure, so a
+# missed heartbeat catches a job that silently stopped running. Paste the
+# full push URL from Kuma; any query string on it is replaced. Treat these
+# as secrets. Leave empty to disable (a warning is logged on every run).
+HEARTBEAT_URL_CHECK=""
+HEARTBEAT_URL_RUN=""
+
+# Bounds for every outbound HTTP call (GitHub API, heartbeats).
+HTTP_TIMEOUT_SECONDS=20
+HTTP_RETRIES=3
+
+# Optional command run once before the first change in a `run` or
+# `containers apply` (before OS packages or any container image change).
+# A non-zero exit aborts the run before anything is changed. Intended for
+# a host-level snapshot tool, for example a container snapshot command.
+# Runs as root through `bash -c`, so only put a trusted command here.
+PRE_CHANGE_HOOK=""
+PRE_CHANGE_HOOK_TIMEOUT_SECONDS=1800
+
+# Public resolver used by failure diagnostics to tell "the local resolver
+# returns a different answer" (DNS filtering) apart from "the network is
+# blocked". Only used when the `dig` command is installed.
+DIAG_PUBLIC_RESOLVER="1.1.1.1"
+
+# ===========================================================================
+# Schedules (systemd OnCalendar syntax; applied by install.sh, so re-run
+# install.sh after changing them by hand)
+# ===========================================================================
+
+# Daily read-only check.
+CHECK_CALENDAR="*-*-* 07:00"
+
+# Maintenance window. systemd matches a weekday AND a date range together
+# (unlike cron), so "Sun *-*-01..07 03:00" really is the first Sunday of
+# each month. Test an expression with: systemd-analyze calendar "<expr>"
+RUN_CALENDAR="Sun *-*-01..07 03:00"
+
+# Random delay added to the window start, so several hosts on the same
+# schedule do not all update (and reboot) at the same second.
+RUN_RANDOM_DELAY="10min"
+
+# ===========================================================================
+# OS Updates
+# ===========================================================================
+
+OS_UPDATES_ENABLED=true
+
+# all      - full upgrade (apt-get full-upgrade, dnf/yum upgrade)
+# security - security updates only (dnf/yum --security; on Debian-family
+#            hosts, packages whose candidate version comes from a repo
+#            with "security" in its name: a best-effort heuristic)
+UPDATE_MODE="all"
+
+# How long apt waits for another apt/dpkg process (for example
+# unattended-upgrades) to release its lock before giving up.
+APT_LOCK_TIMEOUT_SECONDS=600
+
+# NETWORK bounds package index refreshes and dry runs; INSTALL bounds the
+# actual download-and-install step.
+PKG_NETWORK_TIMEOUT_SECONDS=300
+PKG_INSTALL_TIMEOUT_SECONDS=3600
+
+# Remove packages that are no longer needed after updating.
+AUTOREMOVE=true
+
+# Before rebooting into a new kernel, confirm every DKMS module on the host
+# (for example a backup agent's snapshot driver) built for that kernel. If
+# one did not, the reboot is skipped and an alert is sent.
+DKMS_CHECK=true
+
+# never       - never reboot; report "reboot required" instead
+# if-required - reboot at the end of `run` only when the OS says a reboot
+#               is required
+REBOOT_POLICY="if-required"
+
+# Minutes of warning given to logged-in users before the reboot.
+REBOOT_DELAY_MINUTES=2
+
+# After a reboot started by this tool, how long the post-boot check waits
+# for Docker and the previously running containers to come back.
+POST_BOOT_TIMEOUT_SECONDS=600
+
+# With REBOOT_POLICY=never, alert once a reboot has been pending this many
+# days. 0 disables the alert.
+REBOOT_PENDING_ALERT_DAYS=14
+
+# ===========================================================================
+# Container Image Updates
+# ===========================================================================
+
+CONTAINER_UPDATES_ENABLED=true
+
+# A release must be at least this many days old before `run` applies it.
+# Skips bad releases that get a quick follow-up fix.
+SOAK_DAYS=7
+
+# true  - `run` only applies an update after `server-maintenance containers
+#         approve <image> <tag>` was run for that exact tag
+# false - `run` applies the newest release that is past SOAK_DAYS
+REQUIRE_APPROVAL=true
+
+# `check` alerts when a pinned version is this many days older than a newer
+# release that exists (a backstop against falling out of an upstream
+# support window). 0 disables the alert.
+STALE_ALERT_DAYS=180
+
+# Directories searched for Compose projects when an image has no explicit
+# PROJECTS list (space-separated, searched 3 levels deep).
+PROJECT_SEARCH_DIRS="/opt"
+
+# Seconds a container gets to pass its health check after an update.
+HEALTH_TIMEOUT_SECONDS=90
+
+# Optional file holding a GitHub token (raises the API rate limit from 60
+# to 5000 requests per hour). Must be root-owned and mode 600. A token with
+# no scopes is enough for public repositories.
+GITHUB_TOKEN_FILE=""
+
+# How many previous tags of each managed image to keep locally for a quick
+# manual rollback. Older tags are removed after a successful update.
+KEEP_OLD_IMAGES=1
+
+# Space-separated list of image IDs managed by this tool. Each ID needs an
+# IMAGE_<id>_* block below. IDs may contain letters, digits and underscores.
+MANAGED_IMAGES=""
+
+# --- Per-image settings ----------------------------------------------------
+# IMAGE_<id>_REPO              GitHub "owner/repo" whose releases are the
+#                              version source (drafts and prereleases are
+#                              skipped).
+# IMAGE_<id>_REGISTRY          Image reference without the tag, exactly as
+#                              written in the compose file.
+# IMAGE_<id>_FILE              Absolute path of the ONE compose file where
+#                              the tag is pinned. The tag must be written
+#                              literally (image: name:1.2.3), not through a
+#                              ${VARIABLE}, because this tool never reads
+#                              .env files.
+# IMAGE_<id>_TAG_REGEX         Extended regex a release tag must match
+#                              (after TAG_STRIP_PREFIX is removed).
+# IMAGE_<id>_TAG_STRIP_PREFIX  Prefix removed from GitHub release tags to
+#                              get the image tag (for example "v").
+# IMAGE_<id>_HEALTH            Health check run after each project update:
+#                                log-match:<count>:<text>  at least <count>
+#                                  log lines containing <text> from the new
+#                                  container
+#                                docker-health             the image's own
+#                                  HEALTHCHECK reports "healthy"
+#                                http:<url>                <url> answers
+#                                  with HTTP 2xx or 3xx from this host
+#                                running:<seconds>         container stays
+#                                  up, without restarting, for <seconds>
+# IMAGE_<id>_PROJECTS          Optional space-separated list of Compose
+#                              project directories. When empty, projects
+#                              are discovered: every compose file under
+#                              PROJECT_SEARCH_DIRS that "extends" FILE, or
+#                              FILE itself when nothing extends it.
+# IMAGE_<id>_DIAG_HOSTS        Optional host names checked by failure
+#                              diagnostics (DNS answer and TCP 443).
+#
+# Projects are updated one at a time. If a project fails its health check,
+# the tag is put back, every project already updated in that run is brought
+# back up on the old tag, and the run stops with an alert.
+
+# Example: cloudflared shared by several tunnel projects that each
+# "extends" one common file.
+#MANAGED_IMAGES="cloudflared"
+#IMAGE_cloudflared_REPO="cloudflare/cloudflared"
+#IMAGE_cloudflared_REGISTRY="cloudflare/cloudflared"
+#IMAGE_cloudflared_FILE="/opt/Compose-Common/cloudflared.yaml"
+#IMAGE_cloudflared_TAG_REGEX='^[0-9]{4}\.[0-9]+\.[0-9]+$'
+#IMAGE_cloudflared_TAG_STRIP_PREFIX=""
+#IMAGE_cloudflared_HEALTH="log-match:2:Registered tunnel connection"
+#IMAGE_cloudflared_PROJECTS=""
+#IMAGE_cloudflared_DIAG_HOSTS="region1.v2.argotunnel.com region2.v2.argotunnel.com"
+
+# Example: a single Vaultwarden project with the tag pinned in its own
+# compose file, checked through its localhost-only port.
+#MANAGED_IMAGES="cloudflared vaultwarden"
+#IMAGE_vaultwarden_REPO="dani-garcia/vaultwarden"
+#IMAGE_vaultwarden_REGISTRY="vaultwarden/server"
+#IMAGE_vaultwarden_FILE="/opt/Vaultwarden/compose.yaml"
+#IMAGE_vaultwarden_TAG_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
+#IMAGE_vaultwarden_TAG_STRIP_PREFIX=""
+#IMAGE_vaultwarden_HEALTH="http:http://127.0.0.1:8081/alive"
+#IMAGE_vaultwarden_PROJECTS=""
+#IMAGE_vaultwarden_DIAG_HOSTS=""

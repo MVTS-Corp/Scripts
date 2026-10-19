@@ -1,0 +1,16 @@
+# server-maintenance-run.service
+# Installed by Linux/Server-Maintenance/install.sh. Maintenance window:
+# OS updates, container image updates, reboot when required.
+[Unit]
+Description=server-maintenance maintenance window
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-maintenance run
+# Package installs and image pulls can take a while; every step inside has
+# its own timeout, this is the outer backstop.
+TimeoutStartSec=3h
+# Never let systemd kill the job halfway through a dpkg run on stop.
+KillMode=process
