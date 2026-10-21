@@ -1,4 +1,4 @@
-README.md v1.0.0 (Last Rev: 2026-10-18)
+README.md v1.0.1 (Last Rev: 2026-10-20)
 
 # Server-Maintenance
 
@@ -228,7 +228,7 @@ or an image). A non-zero exit stops the run with nothing changed. It is
 meant for a host-level container snapshot tool once one is ready; leave it
 empty until then.
 
-### RMM Integration (Action1 And Similar)
+### RMM Integration
 
 `/var/lib/server-maintenance/status.env` holds the last results, and
 `server-maintenance status --oneline` prints them on one line, exiting 1
@@ -239,10 +239,10 @@ OK | server-maintenance v1.0.0 | check ok 2026-10-18 07:04:12 EDT | run ok ... |
 ```
 
 An RMM can run that as a scheduled script and show or alert on the output.
-Action1's documented way to set a custom attribute from a script is a
-PowerShell cmdlet; whether its Linux agent can set one from Bash is not
-confirmed (see Tested Versus Assumed), so the status command is the
-integration point for now.
+Some RMMs can also store a script's result in a custom field on the device;
+whether that works from a Bash script depends on the RMM's Linux agent
+(see Tested Versus Assumed), so the status command is the integration
+point for now.
 
 ### Coexistence Notes
 
@@ -289,7 +289,7 @@ Assumed (not yet verified on a real host):
   rendered timers firing at the expected times.
 - The DKMS check against a real out-of-tree module.
 - The Fedora/RHEL paths (logic shared with Linux/Updates, not run here).
-- Action1 custom attributes from a Bash script on its Linux agent.
+- Writing an RMM custom field from a Bash script on the RMM's Linux agent.
 
 Run it first on a test VM: `validate`, `check`, `containers apply --now` on
 a non-critical image, then one `run` with `--no-reboot`, then a full `run`.

@@ -180,7 +180,7 @@ finish_job() {
 }
 
 # status_update KEY VALUE [KEY VALUE ...] - merges values into the status
-# file read by `status` (and by an RMM such as Action1 through
+# file read by `status` (and by an RMM through
 # `status --oneline`).
 STATUS_KEYS=(SM_VERSION LAST_CHECK_AT LAST_CHECK_RESULT LAST_RUN_AT LAST_RUN_RESULT
              LAST_POST_BOOT_AT LAST_POST_BOOT_RESULT OS_PENDING OS_SECURITY_PENDING
