@@ -1,4 +1,4 @@
-README.md v1.1.0 (Last Rev: 2026-09-18)
+README.md v1.2.0 (Last Rev: 2026-10-28)
 
 ## Overview
 
@@ -16,8 +16,10 @@ subfolder is a self-contained tool with its own README.
   on standalone machines, domain members, domain controllers, and Hyper-V
   hosts, aware of domain roles and Group Policy. Installs and updates itself
   from GitHub. See `NTP-Config/README.md`.
-- **Server/** - placeholder for Windows Server specific scripts; empty for
-  now. See `Server/README.md`.
+- **Server/** - Windows Server tools: `Server-Setup` (baseline provisioning
+  for new servers, one-line install) and `AppX-Deadlock` (fix and check for
+  the AppXSvc deadlock that stops servers rebooting or accepting RDP). See
+  `Server/README.md`.
 
 ## Quick Start
 
