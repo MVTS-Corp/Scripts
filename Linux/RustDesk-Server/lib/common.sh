@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# common.sh
+# 2026-11-14
+# Version: v1.2.2
+#
+# PURPOSE:
+# Shared logging and helper functions used across RustDesk-Server scripts.
+# Copied from Linux/Server-Setup/lib/common.sh v1.2.2. Only this PURPOSE
+# text and the wording of the terminal-not-ready message differ.
+# Sourced, not executed. Deliberately a standalone copy rather than one
+# shared with another Linux/ tool - see Linux/Notifications/lib/common.sh
+# for why (each tool stays independently clone-and-installable).
+#
+# CHANGELOG:
+#   v1.2.2 - ask()/confirm() read through readline (read -e) on a
+#            terminal. With plain read, a terminal whose Backspace code
+#            doesn't match the tty's erase character moved the cursor
+#            without deleting, and Ctrl+Backspace then erased the whole
+#            line including the prompt. Prompts and typed answers no
+#            longer appear in the run log (they go to /dev/tty only).
+#   v1.2.1 - wait_for_tty_foreground() now logs pgid/tpgid/stdin/tty/ps
+#            state when it gives up, and its error message no longer calls
+#            this a "race": the 5s wait never succeeded on the affected
+#            host, so the mismatch is persistent, not transient.
+#   v1.2.0 - ask()/confirm() now wait_for_tty_foreground() before reading.
+#            Observed in the field: bootstrap.sh's `curl | sudo bash`
+#            invocation escalates through sudo, which allocates a fresh
+#            pty for the child. There is a brief window after that where
+#            the new pty's foreground process group has not yet been set
+#            to match the running script - a read() from the terminal
+#            during that window gets SIGTTIN and stops the process, and
+#            since nothing here is an interactive job-control shell that
+#            would send SIGCONT on focus, it stayed stopped forever
+#            (state T), requiring a reboot to clear. Now bounded to a 5s
+#            wait with a clear error instead of hanging indefinitely.
+#   v1.1.0 - Added apply_log_permissions(), matching Linux/Updates/lib/
+#            common.sh, so setup-server.sh's run log is locked down
+#            instead of left at whatever mkdir's inherited umask produced.
+#   v1.0.1 - confirm() now accepts yes/Yes/YES, not just a bare y/Y,
+#            matching Linux/Updates/lib/common.sh.
+
+COLOR_RED='\033[0;31m'
+COLOR_GREEN='\033[0;32m'
+COLOR_YELLOW='\033[0;33m'
+COLOR_RESET='\033[0m'
+
+log_info()  { printf '%b[*]%b %s\n' "$COLOR_GREEN" "$COLOR_RESET" "$*"; }
+log_warn()  { printf '%b[!]%b %s\n' "$COLOR_YELLOW" "$COLOR_RESET" "$*" >&2; }
+log_error() { printf '%b[x]%b %s\n' "$COLOR_RED" "$COLOR_RESET" "$*" >&2; }
+die() { log_error "$*"; exit 1; }
+
+require_root() {
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        die "This script must be run as root (try: sudo $0)"
+    fi
+}
+
+# wait_for_tty_foreground - blocks a bounded amount of time until this
+# process is in the foreground process group of its controlling terminal,
+# so the read() in ask()/confirm() cannot land in the sudo-pty race
+# described in the CHANGELOG above. No-op when stdin isn't a terminal, or
+# when `ps` isn't available to check (best-effort, matches the rest of
+# this file's degrade-to-warning style - not worth failing setup over).
+wait_for_tty_foreground() {
+    [[ -t 0 ]] || return 0
+    command -v ps >/dev/null 2>&1 || return 0
+
+    local waited_ms=0 my_pgid tty_pgid
+    while (( waited_ms < 5000 )); do
+        my_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+        tty_pgid="$(ps -o tpgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+        [[ -n "$my_pgid" && "$my_pgid" == "$tty_pgid" ]] && return 0
+        sleep 0.1
+        (( waited_ms += 100 ))
+    done
+
+    log_error "Terminal diagnostics at failure (share these when reporting this):"
+    log_error "  this process: pgid='${my_pgid:-?}'  terminal foreground pgid (tpgid)='${tty_pgid:-?}'"
+    log_error "  stdin: $(readlink /proc/$$/fd/0 2>/dev/null || echo '?')  tty: $(tty 2>/dev/null || echo '?')"
+    log_error "  ps: $(ps -o pid=,ppid=,pgid=,sid=,tpgid=,tty=,stat= -p $$ 2>/dev/null | tr -s ' ' || echo '?')  (pid ppid pgid sid tpgid tty stat)"
+    log_error "  SUDO_COMMAND='${SUDO_COMMAND:-}'  sudo pty in use: $([[ -n "${SUDO_TTY:-}" ]] && echo "yes (SUDO_TTY=${SUDO_TTY})" || echo 'no/unknown')"
+    die "Terminal is not ready for interactive input after 5s (this process is not in its controlling terminal's foreground process group, so reading would stop it). Likely cause: piping through 'curl | sudo bash'. Re-run with --yes (plus the required flags) to skip prompts, use: sudo bash -c \"\$(curl -fsSL <bootstrap.sh URL>)\", or run the script from a direct clone."
+}
+
+# read_reply "Prompt text" - reads one line into the caller's $reply.
+# On a terminal it uses readline (-e) so Backspace/Ctrl+Backspace/arrows
+# work whatever erase code the terminal sends; plain `read` leaves editing
+# to the tty driver, which mishandles a mismatched Backspace (cursor moves
+# but nothing is deleted) and can erase the prompt itself. Readline draws
+# on stderr, which setup-server.sh pipes through tee, so it is pointed at
+# /dev/tty for the duration of the read; that also keeps editing escape
+# sequences out of the log file.
+read_reply() {
+    if [[ -t 0 ]] && { : >/dev/tty; } 2>/dev/null; then
+        read -e -r -p "$1" reply 2>/dev/tty
+    else
+        read -r -p "$1" reply
+    fi
+}
+
+# confirm "Prompt text" [default y|n]
+confirm() {
+    local prompt="$1" default="${2:-y}" reply hint="y/N"
+    [[ "$default" == "y" ]] && hint="Y/n"
+    wait_for_tty_foreground
+    read_reply "$prompt [$hint] "
+    reply="${reply:-$default}"
+    [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+# ask "Prompt text" [default value] -> echoes the answer
+ask() {
+    local prompt="$1" default="${2:-}" reply
+    wait_for_tty_foreground
+    if [[ -n "$default" ]]; then
+        read_reply "$prompt [$default]: "
+        echo "${reply:-$default}"
+    else
+        read_reply "$prompt: "
+        echo "$reply"
+    fi
+}
+
+# apply_log_permissions <log_dir> [extra_group]
+# Locks the log directory down to root (750) plus, where available, the
+# "adm" group (the standard Debian/Ubuntu convention for log-reading
+# access) and one additional caller-supplied group via a POSIX ACL - used
+# by setup-server.sh to grant usr_admin read access to its own run log
+# once that group exists. Every step degrades to a warning rather than
+# failing the caller, since this is a hardening step, not a required one.
+apply_log_permissions() {
+    local log_dir="$1" extra_group="${2:-}"
+
+    chown root:root "$log_dir" 2>/dev/null || true
+    chmod 750 "$log_dir" 2>/dev/null || true
+
+    if getent group adm >/dev/null 2>&1; then
+        chown root:adm "$log_dir" 2>/dev/null || true
+    fi
+
+    if ! command -v setfacl >/dev/null 2>&1; then
+        [[ -n "$extra_group" ]] && log_warn "setfacl not available; cannot grant group '$extra_group' read access to $log_dir. Install the 'acl' package and re-run."
+        return 0
+    fi
+
+    # Reset extended ACL entries first so a group removed/changed between
+    # re-runs doesn't linger with stale access.
+    setfacl -b "$log_dir" 2>/dev/null || true
+
+    if getent group adm >/dev/null 2>&1; then
+        setfacl -m g:adm:rx "$log_dir" 2>/dev/null || true
+        setfacl -d -m g:adm:rx "$log_dir" 2>/dev/null || true
+    fi
+
+    if [[ -n "$extra_group" ]]; then
+        if getent group "$extra_group" >/dev/null 2>&1; then
+            setfacl -m g:"$extra_group":rx "$log_dir" 2>/dev/null || true
+            setfacl -d -m g:"$extra_group":rx "$log_dir" 2>/dev/null || true
+        else
+            log_warn "Group '$extra_group' does not exist on this host; skipping log access grant."
+        fi
+    fi
+}

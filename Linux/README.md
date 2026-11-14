@@ -1,4 +1,4 @@
-README.md v1.5.0 (Last Rev: 2026-10-18)
+README.md v1.6.0 (Last Rev: 2026-11-14)
 
 ## Overview
 
@@ -23,6 +23,10 @@ self-contained tool with its own README.
 - **Notifications/** - installs and configures an SMTP relay (via `msmtp`)
   so a host can send alert emails, independent of any other tool. See
   `Notifications/README.md`.
+- **RustDesk-Server/** - installs, verifies, and upgrades the open source
+  RustDesk server (hbbs + hbbr) under Docker Compose with a pinned image,
+  host firewall rules for only the needed ports, enforced key, and rollback.
+  See `RustDesk-Server/README.md`.
 - **Server-Maintenance/** - scheduled maintenance for servers on premises or
   in the cloud: OS updates, container image updates with a soak period,
   approval, health checks and rollback, controlled reboots with a post-boot

@@ -1,0 +1,47 @@
+# compose.yaml - RustDesk OSS server (hbbs + hbbr)
+# Template v1.1.0 (2026-11-14). Written by install-rustdesk-server.sh;
+# edit the template in the repo, not the deployed copy.
+#
+# Host networking on purpose: published Docker ports bypass the host's
+# input firewall chain. Host mode keeps the host firewall authoritative.
+#
+# Image is pinned by tag AND digest from .env. Never use "latest".
+#
+# "-k _" on BOTH services: hbbs enforces the key by default, but hbbr only
+# checks it when given a key (its default is empty, which relays for
+# anyone). With "-k _" both load data/id_ed25519.
+#
+# No depends_on between the services on purpose: whichever starts first
+# with no key file generates one, so starting both together on a fresh
+# data/ can leave them with different keys. The installer starts hbbs
+# alone first, waits for the key, then starts hbbr. After that, restarts
+# in any order are safe because the key file exists.
+#
+# Optional hbbr bandwidth limits (TOTAL_BANDWIDTH, SINGLE_BANDWIDTH,
+# LIMIT_SPEED, in Mb/s) are read from .env through env_file.
+name: rustdesk
+
+x-common: &common
+  image: rustdesk/rustdesk-server:${RD_VERSION:?set RD_VERSION in .env}@${RD_DIGEST:?set RD_DIGEST in .env}
+  network_mode: host
+  volumes:
+    - ./data:/root
+  env_file: .env
+  restart: unless-stopped
+  mem_limit: 256m
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  hbbs:
+    <<: *common
+    container_name: hbbs
+    command: ["hbbs", "-r", "${RD_RELAY_HOST:?set RD_RELAY_HOST in .env}:21117", "-k", "_"]
+
+  hbbr:
+    <<: *common
+    container_name: hbbr
+    command: ["hbbr", "-k", "_"]
