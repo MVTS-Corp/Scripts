@@ -2,9 +2,13 @@
 #
 # setup-server.sh
 # 2026-11-14
-# Version: v1.7.1
+# Version: v1.7.2
 #
 # CHANGELOG:
+#   v1.7.2 - Fix v1.7.1 failing before any change was made with
+#            "ifupdown_managed_ifaces: command not found": the provisioning
+#            plan called the new helper before the script had defined it.
+#            The helper now sits ahead of the plan.
 #   v1.7.1 - The netplan renderer step now skips hosts whose network is
 #            configured by ifupdown (/etc/network/interfaces lists a
 #            non-loopback interface). Found on a RackNerd Ubuntu 26.04 VPS:
@@ -232,7 +236,7 @@ NOTIFICATIONS_LOCAL="${SCRIPT_DIR}/../Notifications/install.sh"
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.7.1"
+SCRIPT_VERSION="v1.7.2"
 
 # Package sets for a daily-use production server. The essentials must install
 # (the run stops if they cannot); the extras are best effort, since a repo may
@@ -658,6 +662,24 @@ fi
 # netplan/dracut/firewall presence, whether usr_admin exists, and any NTP
 # flags), so the operator is agreeing to what will actually happen and not to
 # a generic list. Detection here mirrors the checks the steps themselves make.
+# ---------------------------------------------------------------------------
+# Prints the non-loopback interfaces that ifupdown configures, one per line
+# (empty when ifupdown configures nothing). Some providers (RackNerd, for
+# one) put the real static address in /etc/network/interfaces and leave a
+# cloud-init netplan file that does not describe it; handing that netplan
+# file to NetworkManager takes the address away and cuts the host off.
+# ---------------------------------------------------------------------------
+ifupdown_managed_ifaces() {
+    local files=() f
+    [[ -f /etc/network/interfaces ]] && files+=(/etc/network/interfaces)
+    for f in /etc/network/interfaces.d/*; do
+        [[ -f "$f" ]] && files+=("$f")
+    done
+    (( ${#files[@]} )) || return 0
+    awk '$1 == "iface" && $2 != "lo" && ($3 == "inet" || $3 == "inet6") { print $2 }' "${files[@]}" 2>/dev/null \
+        | sort -u
+}
+
 plan_step() {   # plan_step N "Title" "what it does"
     printf '  %s. %s\n' "$1" "$2"
     printf '%s\n' "$3" | fold -s -w 68 | sed 's/[[:space:]]*$//; s/^/       /'
@@ -1363,24 +1385,6 @@ configure_initramfs_no_network() {
         fi
     fi
     log_info "  initramfs: rebuilt without networking; takes effect on the next boot."
-}
-
-# ---------------------------------------------------------------------------
-# Prints the non-loopback interfaces that ifupdown configures, one per line
-# (empty when ifupdown configures nothing). Some providers (RackNerd, for
-# one) put the real static address in /etc/network/interfaces and leave a
-# cloud-init netplan file that does not describe it; handing that netplan
-# file to NetworkManager takes the address away and cuts the host off.
-# ---------------------------------------------------------------------------
-ifupdown_managed_ifaces() {
-    local files=() f
-    [[ -f /etc/network/interfaces ]] && files+=(/etc/network/interfaces)
-    for f in /etc/network/interfaces.d/*; do
-        [[ -f "$f" ]] && files+=("$f")
-    done
-    (( ${#files[@]} )) || return 0
-    awk '$1 == "iface" && $2 != "lo" && ($3 == "inet" || $3 == "inet6") { print $2 }' "${files[@]}" 2>/dev/null \
-        | sort -u
 }
 
 # ---------------------------------------------------------------------------
