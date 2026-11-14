@@ -1,4 +1,4 @@
-README.md v1.7.0 (Last Rev: 2026-10-18)
+README.md v1.7.1 (Last Rev: 2026-11-14)
 
 # Server-Setup
 
