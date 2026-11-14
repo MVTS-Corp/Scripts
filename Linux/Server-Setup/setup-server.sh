@@ -2,9 +2,18 @@
 #
 # setup-server.sh
 # 2026-10-18
-# Version: v1.7.0
+# Version: v1.7.1
 #
 # CHANGELOG:
+#   v1.7.1 - The netplan renderer step now skips hosts whose network is
+#            configured by ifupdown (/etc/network/interfaces lists a
+#            non-loopback interface). Found on a RackNerd Ubuntu 26.04 VPS:
+#            the real static address lived in /etc/network/interfaces and
+#            the cloud-init netplan file did not describe it, so switching
+#            netplan to NetworkManager and running 'netplan try' left eth0
+#            with no IPv4 address and cut the host off. The plan, the step
+#            and the final summary now say when the step was skipped and
+#            why, instead of always reporting the renderer as changed.
 #   v1.7.0 - Fixes and a production tool baseline:
 #            * usr_admin: an interactive run now shows who is in the group
 #              and lets the operator add other local users to it (names, or
@@ -223,7 +232,7 @@ NOTIFICATIONS_LOCAL="${SCRIPT_DIR}/../Notifications/install.sh"
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.7.0"
+SCRIPT_VERSION="v1.7.1"
 
 # Package sets for a daily-use production server. The essentials must install
 # (the run stops if they cannot); the extras are best effort, since a repo may
@@ -708,7 +717,11 @@ print_provisioning_plan() {
         cockpit_fw="No active host firewall (firewalld/ufw) was detected, so no port is opened."
     fi
 
-    if command -v netplan >/dev/null 2>&1 && [[ -e "${netplan_files[0]}" ]]; then
+    local plan_ifupdown
+    plan_ifupdown="$(ifupdown_managed_ifaces | paste -sd ' ' -)"
+    if command -v netplan >/dev/null 2>&1 && [[ -e "${netplan_files[0]}" ]] && [[ -n "$plan_ifupdown" ]]; then
+        netplan_txt="Skipped: ifupdown configures ${plan_ifupdown} in /etc/network/interfaces, so netplan does not set this host's addresses. Switching netplan to NetworkManager here could remove the address and cut the host off, so nothing is changed."
+    elif command -v netplan >/dev/null 2>&1 && [[ -e "${netplan_files[0]}" ]]; then
         netplan_txt="Set the netplan renderer to NetworkManager in /etc/netplan (a timestamped backup of each edited file is kept). It is validated but NOT applied live; it takes effect on 'sudo netplan apply' or the next reboot."
         if command -v dracut >/dev/null 2>&1 && command -v update-initramfs >/dev/null 2>&1; then
             netplan_txt+=" This host builds its initramfs with dracut, so networking is also kept out of the initramfs so the static address is used at boot; that rebuilds the initramfs now and applies from the next boot."
@@ -1353,6 +1366,24 @@ configure_initramfs_no_network() {
 }
 
 # ---------------------------------------------------------------------------
+# Prints the non-loopback interfaces that ifupdown configures, one per line
+# (empty when ifupdown configures nothing). Some providers (RackNerd, for
+# one) put the real static address in /etc/network/interfaces and leave a
+# cloud-init netplan file that does not describe it; handing that netplan
+# file to NetworkManager takes the address away and cuts the host off.
+# ---------------------------------------------------------------------------
+ifupdown_managed_ifaces() {
+    local files=() f
+    [[ -f /etc/network/interfaces ]] && files+=(/etc/network/interfaces)
+    for f in /etc/network/interfaces.d/*; do
+        [[ -f "$f" ]] && files+=("$f")
+    done
+    (( ${#files[@]} )) || return 0
+    awk '$1 == "iface" && $2 != "lo" && ($3 == "inet" || $3 == "inet6") { print $2 }' "${files[@]}" 2>/dev/null \
+        | sort -u
+}
+
+# ---------------------------------------------------------------------------
 # 4. netplan renderer (Debian/Ubuntu with netplan only - no-op elsewhere,
 #    including all of Fedora/RHEL which do not use netplan)
 # ---------------------------------------------------------------------------
@@ -1365,6 +1396,14 @@ configure_netplan_renderer() {
     local yaml_files=(/etc/netplan/*.yaml)
     if [[ ! -e "${yaml_files[0]}" ]]; then
         log_info "No netplan YAML files found under /etc/netplan; skipping."
+        return 0
+    fi
+
+    local ifupdown_ifaces
+    ifupdown_ifaces="$(ifupdown_managed_ifaces | paste -sd ' ' -)"
+    if [[ -n "$ifupdown_ifaces" ]]; then
+        log_warn "  ifupdown configures ${ifupdown_ifaces} in /etc/network/interfaces, so the netplan files are not what sets this host's addresses. Leaving the netplan renderer unchanged: switching it to NetworkManager here can remove the address and cut the host off. To manage these interfaces with NetworkManager, move their settings into netplan (or NetworkManager) from the console first, then re-run."
+        NETPLAN_OUTCOME="skipped (ifupdown configures ${ifupdown_ifaces}; nothing changed)"
         return 0
     fi
 
@@ -1397,6 +1436,7 @@ configure_netplan_renderer() {
 
     netplan generate || die "netplan generate failed after editing renderer config - check the files under /etc/netplan for a syntax error (backups were saved alongside each edited file)."
     log_info "netplan config validated. NOT applied automatically (avoids disrupting an active remote session) - run 'sudo netplan apply' or reboot when ready."
+    NETPLAN_OUTCOME="renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
 
     configure_initramfs_no_network
 }
@@ -1551,6 +1591,7 @@ GUEST_OUTCOME="not run"
 LOGGING_OUTCOME="not run"
 UPDATES_OUTCOME="not run"
 ALERTS_OUTCOME="not offered"
+NETPLAN_OUTCOME=""
 
 # flag_step "Step name" "what went wrong"
 flag_step() {
@@ -2097,11 +2138,8 @@ else
     echo "  usr_admin:   not configured (declined when prompted - re-run to set it up later)"
 fi
 echo "  Log:         $SETUP_LOG"
-if command -v netplan >/dev/null 2>&1; then
-    netplan_files=(/etc/netplan/*.yaml)
-    if [[ -e "${netplan_files[0]}" ]]; then
-        echo "  netplan:     renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
-    fi
+if [[ -n "$NETPLAN_OUTCOME" ]]; then
+    echo "  netplan:     ${NETPLAN_OUTCOME}"
 fi
 if reboot_required; then
     echo

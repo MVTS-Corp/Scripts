@@ -42,7 +42,9 @@ AlmaLinux) also detected and supported.
   the interfaces. No-op on Fedora/RHEL (no netplan there) and on hosts
   not using netplan at all. On hosts that build their initramfs with
   dracut (Ubuntu 26.04), it also keeps networking out of the initramfs
-  (see [netplan](#netplan-debianubuntu-only) below for why).
+  (see [netplan](#netplan-debianubuntu-only) below for why). Skipped when
+  ifupdown configures the interfaces (`/etc/network/interfaces`), as on
+  some VPS providers.
 - Applies a baseline host firewall through `Linux/Firewall-Config`: all inbound
   traffic blocked except SSH (rate limited) and Cockpit, with an optional
   management subnet. See [Security baselines](#security-baselines).
@@ -304,6 +306,16 @@ connectivity if something about the change is wrong for this host. Run
 reboot. A timestamped backup of each edited YAML file is left alongside
 the original.
 
+**Hosts configured by ifupdown are skipped.** Some VPS providers
+(RackNerd, for one) put the real static address in
+`/etc/network/interfaces` and leave a cloud-init netplan file that does
+not describe it. Switching that netplan file to NetworkManager and
+applying it removes the address and cuts the host off. If
+`/etc/network/interfaces` (or `/etc/network/interfaces.d/`) configures any
+interface other than `lo`, the step changes nothing and says why. To move
+such a host to NetworkManager, copy the interface settings into netplan
+from the provider's console first, then re-run.
+
 **Initramfs (dracut hosts, e.g. Ubuntu 26.04).** The default dracut
 initramfs contains `systemd-networkd` and a DHCP-everything default
 network file, so it DHCPs the NIC before the real system starts and that
@@ -413,6 +425,13 @@ Newest first. Versions are `setup-server.sh` versions; the full technical
 detail for each is in the changelog at the top of the script. Server-Setup
 runs straight from `main` and is not tagged; the release channels described
 in the top-level README apply to NTP-Config, which this tool calls.
+
+### v1.7.1 (2026-11-14)
+
+- The netplan renderer step skips hosts whose interfaces are configured by
+  ifupdown (`/etc/network/interfaces`). On a RackNerd Ubuntu 26.04 VPS the
+  switch to NetworkManager plus `netplan try` left `eth0` with no address.
+  The plan and final summary now say when the step was skipped.
 
 ### v1.7.0 (2026-10-18)
 
