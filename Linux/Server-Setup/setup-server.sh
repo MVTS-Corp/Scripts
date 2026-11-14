@@ -1017,7 +1017,7 @@ install_speedtest_cli() {
     # for noble or resolute at the time of writing). Probe for the host's own
     # codename first, then fall back to the newest older one that exists.
     if [[ "$ext" == "deb" ]]; then
-        local os_name="" candidates=() cn="" chosen=""
+        local os_name="" candidates=() cn="" chosen="" code=""
         case "$DISTRO_ID" in
             ubuntu) os_name="ubuntu"; candidates=("$DISTRO_VERSION_CODENAME" noble jammy focal) ;;
             debian) os_name="debian"; candidates=("$DISTRO_VERSION_CODENAME" bookworm bullseye buster) ;;
@@ -1025,7 +1025,11 @@ install_speedtest_cli() {
         if [[ -n "$os_name" ]]; then
             for cn in "${candidates[@]}"; do
                 [[ -n "$cn" ]] || continue
-                if timeout 30 curl -fsIL -o /dev/null "${SPEEDTEST_REPO_URL_BASE%/install/repositories/*}/ookla/speedtest-cli/${os_name}/dists/${cn}/Release"; then
+                # Packagecloud answers 404 for a codename it lacks and a redirect
+                # (to its CDN) for one it has, so judge its own answer and do not
+                # follow the redirect.
+                code="$(timeout 30 curl -s -o /dev/null -w '%{http_code}' "${SPEEDTEST_REPO_URL_BASE%/install/repositories/*}/ookla/speedtest-cli/${os_name}/dists/${cn}/Release" 2>/dev/null)" || code=000
+                if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
                     chosen="$cn"; break
                 fi
             done
