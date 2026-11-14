@@ -2,7 +2,7 @@
 #
 # install-rustdesk-server.sh
 # 2026-11-14
-# Version: v1.0.0
+# Version: v1.0.1
 #
 # PURPOSE:
 # Installs, verifies, and upgrades the open source RustDesk server (hbbs ID
@@ -26,6 +26,18 @@
 # Exit codes: 0 success, 1 failure, 3 completed with items flagged for review.
 #
 # CHANGELOG:
+#   v1.0.1 - Fixes from the first lab test run (WSL, real ufw and firewalld):
+#            * Checks no longer pipe into "grep -q". grep exits on the first
+#              match, the writer gets SIGPIPE, and pipefail turns that into
+#              a failure: the nft "policy drop" check failed on a correct
+#              table, and the ufw active/rule checks could report ufw as
+#              inactive or a 21118/21119 rule as absent (fail open).
+#            * --alert sends only the current run's lines. status shares one
+#              log per month, so the 80-line tail mixed in earlier runs.
+#            * A re-run that starts a stopped hbbs/hbbr reports it as a
+#              change instead of "Changes: none".
+#            * install/upgrade log names include the PID. Two runs in the
+#              same second (a failed upgrade and its retry) shared one file.
 #   v1.0.0 - First release. Built from a design handoff and the RustDesk
 #            server 1.1.16 source. Differences from that handoff, and why:
 #            * "-k _" is always passed to hbbs AND hbbr; no --enforce-key
@@ -43,7 +55,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="${SCRIPT_DIR}/templates"
@@ -88,6 +100,7 @@ FLAGGED_ITEMS=()
 CHANGES=()
 FAILED_CHECKS=()
 RUN_LOG=""
+RUN_LOG_START=0
 BACKEND=""
 IMAGE_REF=""
 PINNED=""
@@ -288,8 +301,9 @@ start_logging() {
     if [[ "$MODE" == "status" ]]; then
         RUN_LOG="${LOG_DIR}/status-$(date +%Y%m).log"   # one file a month for frequent checks
     else
-        RUN_LOG="${LOG_DIR}/${MODE}-$(ts_file).log"
+        RUN_LOG="${LOG_DIR}/${MODE}-$(ts_file)-$$.log"   # PID: two runs in one second must not share a log
     fi
+    RUN_LOG_START="$(stat -c %s "$RUN_LOG" 2>/dev/null || echo 0)"   # where this run's lines begin
     exec > >(tee -a "$RUN_LOG") 2>&1
     log_info "${SCRIPT_NAME} ${SCRIPT_VERSION} mode=${MODE} started $(ts_log). Log: ${RUN_LOG}"
 }
@@ -307,7 +321,7 @@ send_failure_alert() {
     host="$(hostname -s 2>/dev/null || echo host)"
     subject="RustDesk server ${MODE}: exit ${rc} on ${host}"
     if [[ -n "$RUN_LOG" && -f "$RUN_LOG" ]]; then
-        tail -n 80 "$RUN_LOG" | sed -E 's/\x1B\[[0-9;]*m//g' | send-alert "$subject" || log_warn "send-alert failed."
+        tail -c "+$(( RUN_LOG_START + 1 ))" "$RUN_LOG" | tail -n 80 | sed -E 's/\x1B\[[0-9;]*m//g' | send-alert "$subject" || log_warn "send-alert failed."
     else
         send-alert "$subject" "No run log was available." || log_warn "send-alert failed."
     fi
@@ -384,7 +398,7 @@ HAVE_NFT=0; HAVE_UFW=0; HAVE_FIREWALLD=0
 
 detect_firewalls() {
     if command -v nft >/dev/null 2>&1 && nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then HAVE_NFT=1; fi
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then HAVE_UFW=1; fi
+    if command -v ufw >/dev/null 2>&1 && grep -q '^Status: active' <<<"$(ufw status 2>/dev/null)"; then HAVE_UFW=1; fi
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then HAVE_FIREWALLD=1; fi
 
     local active=() count
@@ -543,7 +557,7 @@ nft_verify() {
         if grep -qw "$p" <<<"$table"; then check_fail "nft table ${NFT_TABLE} mentions port ${p} (must stay closed)"
         else check_pass "nft table does not open ${p}"; fi
     done
-    if nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null | grep -q 'policy drop'; then
+    if grep -q 'policy drop' <<<"$(nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null)"; then
         check_pass "nft chain ${NFT_CHAIN} policy is drop"
     else
         check_fail "nft chain ${NFT_TABLE}/${NFT_CHAIN} is missing or its policy is not drop"
@@ -566,7 +580,7 @@ nft_verify() {
 UFW_TCP_RULE="21115:21117/tcp"
 UFW_UDP_RULE="21116/udp"
 
-ufw_has() { ufw status 2>/dev/null | grep -qE "^${1}[[:space:]]+ALLOW"; }
+ufw_has() { grep -qE "^${1}[[:space:]]+ALLOW" <<<"$(ufw status 2>/dev/null)"; }
 
 ufw_plan() {
     ufw_has "$UFW_TCP_RULE" && echo "  - ufw: ${UFW_TCP_RULE} already allowed" || echo "  - ufw: allow ${UFW_TCP_RULE} (comment RustDesk)"
@@ -584,7 +598,7 @@ ufw_verify() {
     local p status
     status="$(ufw status verbose 2>/dev/null || true)"
     for p in "${CLOSED_PORTS[@]}"; do
-        if grep -E 'ALLOW' <<<"$status" | grep -qw "$p"; then check_fail "ufw allows port ${p} (must stay closed)"
+        if grep -E 'ALLOW' <<<"$status" | grep -w "$p" >/dev/null; then check_fail "ufw allows port ${p} (must stay closed)"
         else check_pass "ufw does not open ${p}"; fi
     done
     check "ufw default incoming policy is deny/reject" "ufw default incoming policy is not deny/reject" \
@@ -751,8 +765,9 @@ key_files_exist() { [[ -s "${INSTALL_DIR}/data/id_ed25519" && -s "${INSTALL_DIR}
 
 deploy() {
     local before_hbbs before_hbbr
-    before_hbbs="$(docker container inspect -f '{{.Id}}' hbbs 2>/dev/null || true)"
-    before_hbbr="$(docker container inspect -f '{{.Id}}' hbbr 2>/dev/null || true)"
+    # Id plus running state, so starting a stopped container also counts as a change.
+    before_hbbs="$(docker container inspect -f '{{.Id}} {{.State.Running}}' hbbs 2>/dev/null || true)"
+    before_hbbr="$(docker container inspect -f '{{.Id}} {{.State.Running}}' hbbr 2>/dev/null || true)"
 
     # resolve_image already pulled the pinned image, so no "compose pull":
     # re-runs then work without reaching the registry.
@@ -765,8 +780,8 @@ deploy() {
     fi
     dc up -d
 
-    [[ "$(docker container inspect -f '{{.Id}}' hbbs 2>/dev/null)" == "$before_hbbs" ]] || changed "hbbs container (re)created"
-    [[ "$(docker container inspect -f '{{.Id}}' hbbr 2>/dev/null)" == "$before_hbbr" ]] || changed "hbbr container (re)created"
+    [[ "$(docker container inspect -f '{{.Id}} {{.State.Running}}' hbbs 2>/dev/null)" == "$before_hbbs" ]] || changed "hbbs container (re)created or started"
+    [[ "$(docker container inspect -f '{{.Id}} {{.State.Running}}' hbbr 2>/dev/null)" == "$before_hbbr" ]] || changed "hbbr container (re)created or started"
 
     chmod 600 "${INSTALL_DIR}/data/id_ed25519"
     chmod 644 "${INSTALL_DIR}/data/id_ed25519.pub"

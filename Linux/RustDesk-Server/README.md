@@ -1,4 +1,4 @@
-README.md v1.0.0 (Last Rev: 2026-11-14)
+README.md v1.0.1 (Last Rev: 2026-11-14)
 
 # RustDesk-Server
 
@@ -141,7 +141,28 @@ firewall outside the host blocks them (the run is then flagged).
   Sets must be single-line `type inet_service` definitions without
   `flags interval`; anything else stops the run rather than guessing.
   Ports are added one by one (no ranges). Adding accept elements cannot
-  lock anyone out, so there is no rollback timer.
+  lock anyone out, so there is no rollback timer. A table the installer
+  accepts (the layout the lab tests used):
+
+  ```
+  table inet vps_filter
+  delete table inet vps_filter
+
+  table inet vps_filter {
+  	set public_tcp_ports { type inet_service; elements = { 22 } }
+  	set public_udp_ports { type inet_service; }
+
+  	chain input {
+  		type filter hook input priority filter; policy drop;
+  		iif "lo" accept
+  		ct state established,related accept
+  		ct state invalid drop
+  		meta l4proto { icmp, ipv6-icmp } accept
+  		tcp dport @public_tcp_ports counter accept
+  		udp dport @public_udp_ports counter accept
+  	}
+  }
+  ```
 - **ufw:** `21115:21117/tcp` and `21116/udp` with a `RustDesk` comment.
 - **firewalld:** a `rustdesk` service (21115-21117/tcp, 21116/udp) enabled in
   the default zone, or `RD_FIREWALLD_ZONE`, permanent and runtime.
@@ -177,7 +198,11 @@ password. hbbr's bandwidth limits (`TOTAL_BANDWIDTH`, `SINGLE_BANDWIDTH`,
 
 hbbs checks the key when a client asks to **connect**, not when it
 **registers**, so a client without the key may still get an ID; its
-connections should fail with a key mismatch.
+connections fail with a key mismatch.
+
+Testing note: hbbr treats TCP connections from a loopback address as its
+local admin command port and never applies the key check to them. Probe
+21117 from a non-loopback address (the host's own LAN or public IP works).
 
 **First start:** whichever service starts first without a key file
 generates one, and hbbr waits only 300 ms. Starting both together on an empty
@@ -229,21 +254,31 @@ installer file name or by an exported config string.
 
 ## Tested vs Assumed
 
+"Lab VM" below means a disposable WSL 2 VM (Ubuntu 26.04, systemd, NAT
+networking) running its own Docker Engine 29.9 and Compose 5.7, with the
+installer at v1.0.1 and RustDesk 1.1.16/1.1.15 pinned by digest.
+
 | Item | State |
 |------|-------|
 | Input validation (`latest`, floating tags, missing relay host, bad digest, bad firewall mode) rejected before any change | Tested 2026-11-14 |
-| Install with RustDesk 1.1.16 on Docker 29.9 / Compose 5.6, nft backend against a copy of a production table layout: all verify checks pass, both services log the same key | Tested 2026-11-14, in a disposable container (not a VM) |
-| Second run reports no changes | Tested 2026-11-14 |
+| Install with RustDesk 1.1.16, nft backend against the table layout above: `--dry-run` changes nothing, all 21 verify checks pass, both services log the same key, exit 3 only for DNS | Tested 2026-11-14, lab VM |
+| Second run reports no changes | Tested 2026-11-14, lab VM |
 | nftables file edit: correct, idempotent, passes `nft -c`; multi-line or `flags interval` sets refused | Tested 2026-11-14 |
-| `upgrade` to a missing tag fails with nothing changed | Tested 2026-11-14 |
-| `upgrade` between 1.1.16 and 1.1.15 both ways, digest recorded on first use | Tested 2026-11-14 |
-| Rollback after a failed verify restores the old version, data, and `.env` | Tested 2026-11-14 with a deliberately failing check in a throwaway copy |
-| nft plus active ufw stops with the conflict message and changes nothing | Tested 2026-11-14 with a stand-in ufw that reports active |
-| ufw and firewalld backends | Assumed: written, not yet run |
+| `upgrade` to a missing tag fails with nothing changed | Tested 2026-11-14, lab VM |
+| `upgrade` between 1.1.16 and 1.1.15 both ways, digest recorded and flagged on first use | Tested 2026-11-14, lab VM |
+| Rollback after a failed verify restores the old version, data, and `.env` | Tested 2026-11-14 with a deliberately failing check in a throwaway copy (not repeated in the lab VM) |
+| nft plus active ufw stops with the conflict message and changes nothing (nft file, `.env`, compose file, live table unchanged) | Tested 2026-11-14, lab VM, real ufw 0.36.2 |
+| ufw backend alone: install, all 18 checks pass, re-run changes nothing | Tested 2026-11-14, lab VM, ufw 0.36.2 |
+| firewalld backend alone: install, all 18 checks pass, re-run changes nothing | Tested 2026-11-14, lab VM, firewalld 2.3.1 with `IPv6_rpfilter=no` (the WSL kernel lacks IPv6 fib support; a normal kernel does not need this) |
+| No firewall: `auto` refuses with nothing changed; `--firewall none` installs and flags | Tested 2026-11-14, lab VM |
+| hbbs refuses a connect request (PunchHoleRequest) with an empty or wrong key (`LICENSE_MISMATCH`); the right key gets past the check (`ID_NOT_EXIST` for an unknown ID) | Tested 2026-11-14, lab VM, protocol-level client built from the 1.1.16 protos |
+| hbbr closes a RequestRelay with an empty or wrong key and logs "Relay authentication failed ... invalid key"; the right key is accepted with no such line | Tested 2026-11-14, lab VM, same client |
+| Without `-k _` on hbbr, the same wrong-key and empty-key relay requests are accepted; re-running the installer restores `-k _` and status passes | Tested 2026-11-14, lab VM (control test) |
+| 21115-21117/tcp reachable from outside, 21118/21119 time out, UDP 21116 reaches the accept rule (nft counter) | Tested 2026-11-14, lab VM from its Windows host over WSL NAT, nft backend only |
+| `--alert` passes the current run's log tail to send-alert on failure (also on exit 3, by design) | Tested 2026-11-14, lab VM, stub send-alert (delivery by the real Linux/Notifications not tested) |
 | Clients with the key register and connect, including forced relay | Assumed: needs a lab test with real clients |
-| A client without the key is refused (hbbs and hbbr) | Assumed from source: needs a lab test |
-| 21115-21117/tcp and 21116/udp reachable from outside, 21118/21119 not | Assumed: needs an external port test |
-| `--alert` delivery through send-alert | Assumed: not yet run |
+| A real client without the key is refused | Assumed: proven at protocol level only |
+| Reachability through a real public network and provider firewall | Assumed: needs a test on the production host |
 
 ## Operator Checklist After Install
 
