@@ -1,4 +1,4 @@
-README.md v1.8.0 (Last Rev: 2026-11-14)
+README.md v1.8.1 (Last Rev: 2026-11-14)
 
 # Server-Setup
 
@@ -428,6 +428,14 @@ Newest first. Versions are `setup-server.sh` versions; the full technical
 detail for each is in the changelog at the top of the script. Server-Setup
 runs straight from `main` and is not tagged; the release channels described
 in the top-level README apply to NTP-Config, which this tool calls.
+
+### v1.8.1 (2026-11-14)
+
+- Fix the Speedtest CLI step on Ubuntu 24.04 and 26.04: Ookla's repository has
+  no packages for those releases (it stops at 22.04). The step now falls back
+  to the newest older release Ookla publishes, and removes the apt source again
+  if the install fails, so a failed attempt no longer leaves `apt-get update`
+  erroring.
 
 ### v1.8.0 (2026-11-14)
 

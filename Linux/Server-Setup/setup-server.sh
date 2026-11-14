@@ -2,9 +2,18 @@
 #
 # setup-server.sh
 # 2026-11-14
-# Version: v1.8.0
+# Version: v1.8.1
 #
 # CHANGELOG:
+#   v1.8.1 - Fix the Speedtest CLI step failing on Ubuntu 24.04 (noble) and
+#            26.04 (resolute): Ookla's packagecloud repository has no Release
+#            file for those codenames (only up to 22.04 jammy), and its setup
+#            script exits 0 anyway while leaving a broken apt source behind.
+#            The step now checks which codename the repository really has,
+#            falls back to the newest older one (the speedtest package is a
+#            self-contained binary), passes it to Ookla's script via os= and
+#            dist=, and removes the apt source and key again if the install
+#            fails so later 'apt-get update' runs stay clean.
 #   v1.8.0 - Installs Ookla's official Speedtest CLI ('speedtest') as part of
 #            the extra admin tools, for testing internet connections from a
 #            console when troubleshooting. Added from Ookla's packagecloud
@@ -248,7 +257,7 @@ NOTIFICATIONS_LOCAL="${SCRIPT_DIR}/../Notifications/install.sh"
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.8.0"
+SCRIPT_VERSION="v1.8.1"
 
 # Package sets for a daily-use production server. The essentials must install
 # (the run stops if they cannot); the extras are best effort, since a repo may
@@ -1001,8 +1010,36 @@ install_speedtest_cli() {
         return 0
     fi
 
-    local ext="deb"
+    local ext="deb" env_override=()
     [[ "$DISTRO_FAMILY" == "debian" ]] || ext="rpm"
+
+    # Ookla's repository lags behind new Ubuntu/Debian releases (no Release file
+    # for noble or resolute at the time of writing). Probe for the host's own
+    # codename first, then fall back to the newest older one that exists.
+    if [[ "$ext" == "deb" ]]; then
+        local os_name="" candidates=() cn="" chosen=""
+        case "$DISTRO_ID" in
+            ubuntu) os_name="ubuntu"; candidates=("$DISTRO_VERSION_CODENAME" noble jammy focal) ;;
+            debian) os_name="debian"; candidates=("$DISTRO_VERSION_CODENAME" bookworm bullseye buster) ;;
+        esac
+        if [[ -n "$os_name" ]]; then
+            for cn in "${candidates[@]}"; do
+                [[ -n "$cn" ]] || continue
+                if timeout 30 curl -fsIL -o /dev/null "${SPEEDTEST_REPO_URL_BASE%/install/repositories/*}/ookla/speedtest-cli/${os_name}/dists/${cn}/Release"; then
+                    chosen="$cn"; break
+                fi
+            done
+            if [[ -z "$chosen" ]]; then
+                flag_step "Speedtest CLI" "Ookla's repository has no release for ${DISTRO_ID} ${DISTRO_VERSION_CODENAME} or any older fallback; skipped. Install the official tarball from https://www.speedtest.net/apps/cli instead."
+                return 0
+            fi
+            if [[ "$chosen" != "$DISTRO_VERSION_CODENAME" ]]; then
+                log_warn "Ookla's repository has no ${DISTRO_VERSION_CODENAME} release yet; using its ${chosen} packages (the speedtest binary is self-contained)."
+            fi
+            env_override=(os="$os_name" dist="$chosen")
+        fi
+    fi
+
     local tmp
     tmp="$(mktemp)" || { flag_step "Speedtest CLI" "could not create a temporary file."; return 0; }
 
@@ -1013,15 +1050,15 @@ install_speedtest_cli() {
         flag_step "Speedtest CLI" "could not download Ookla's repository setup script from packagecloud.io."
         return 0
     fi
-    if ! timeout 300 bash "$tmp"; then
-        rm -f "$tmp"
-        flag_step "Speedtest CLI" "Ookla's repository setup script failed (this distro release may not be supported yet)."
-        return 0
-    fi
+    # Ookla's script exits 0 even when its own 'apt-get update' fails, so the
+    # install below is what decides success. Clean up the apt source on failure.
+    timeout 300 env ${env_override[@]+"${env_override[@]}"} bash "$tmp" || log_warn "Ookla's repository setup script reported an error; checking whether the package is installable anyway."
     rm -f "$tmp"
 
     if ! pkg_install speedtest || ! command -v speedtest >/dev/null 2>&1; then
-        flag_step "Speedtest CLI" "the 'speedtest' package did not install from Ookla's repository."
+        rm -f /etc/apt/sources.list.d/ookla_speedtest-cli.list /etc/apt/keyrings/ookla_speedtest-cli-archive-keyring.gpg
+        rm -f /etc/yum.repos.d/ookla_speedtest-cli.repo
+        flag_step "Speedtest CLI" "the 'speedtest' package did not install from Ookla's repository (its repo source was removed again)."
         return 0
     fi
     log_info "Speedtest CLI installed. Run 'speedtest' once to review and accept Ookla's license."
