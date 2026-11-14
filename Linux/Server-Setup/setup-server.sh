@@ -2,9 +2,21 @@
 #
 # setup-server.sh
 # 2026-11-14
-# Version: v1.7.2
+# Version: v1.8.0
 #
 # CHANGELOG:
+#   v1.8.0 - Installs Ookla's official Speedtest CLI ('speedtest') as part of
+#            the extra admin tools, for testing internet connections from a
+#            console when troubleshooting. Added from Ookla's packagecloud
+#            repository (Debian/Ubuntu and Fedora/RHEL families), the method
+#            documented at speedtest.net/apps/cli. The repo setup script is
+#            downloaded to a file and run only if the download succeeded (not
+#            piped straight into a shell). Best effort: a failure is flagged
+#            in the final summary, it does not stop the run. An unofficial
+#            'speedtest-cli' package is not removed; the step is flagged
+#            instead, since it conflicts. Skipped by --skip-extra-tools. The
+#            Ookla license is not accepted on anyone's behalf; the first
+#            interactive run of 'speedtest' asks.
 #   v1.7.2 - Fix v1.7.1 failing before any change was made with
 #            "ifupdown_managed_ifaces: command not found": the provisioning
 #            plan called the new helper before the script had defined it.
@@ -236,7 +248,7 @@ NOTIFICATIONS_LOCAL="${SCRIPT_DIR}/../Notifications/install.sh"
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.7.2"
+SCRIPT_VERSION="v1.8.0"
 
 # Package sets for a daily-use production server. The essentials must install
 # (the run stops if they cannot); the extras are best effort, since a repo may
@@ -321,7 +333,8 @@ Usage: sudo ${0##*/} [--admin-user NAME] [--hostname FQDN] [--timezone TZ] [--ye
                      whether to add others.
   --skip-os-update   Skip the full operating system update that runs first.
   --skip-extra-tools Install only the essential packages, not the usual
-                     admin tools (htop, tmux, git, vim, ...).
+                     admin tools (htop, tmux, git, vim, ...) or the
+                     Speedtest CLI.
   --mgmt-subnet CIDRS
                      Management subnet(s), comma separated. SSH and Cockpit
                      are then reachable only from there, and fail2ban never
@@ -843,7 +856,7 @@ print_provisioning_plan() {
     if (( SKIP_EXTRA_TOOLS )); then
         plan_step 2 "Base packages" "Install the essentials: ${pkgs}. A new SSH server is started; one already installed is left as it is. Extra admin tools are skipped (--skip-extra-tools)."
     else
-        plan_step 2 "Base packages" "Install the essentials: ${pkgs}. A new SSH server is started; one already installed is left as it is. Then the usual admin tools, best effort (any a repository does not carry is skipped): ${pkgs_extra}$(command -v systemd-detect-virt >/dev/null 2>&1 && ! systemd-detect-virt --quiet 2>/dev/null && echo ", smartmontools")."
+        plan_step 2 "Base packages" "Install the essentials: ${pkgs}. A new SSH server is started; one already installed is left as it is. Then the usual admin tools, best effort (any a repository does not carry is skipped): ${pkgs_extra}$(command -v systemd-detect-virt >/dev/null 2>&1 && ! systemd-detect-virt --quiet 2>/dev/null && echo ", smartmontools"). Also Ookla's Speedtest CLI (speedtest) from Ookla's own package repository, for testing the internet connection from the console."
     fi
     plan_step 3 "Host name" "$host_txt"
     plan_step 4 "Timezone" "Set the system timezone to ${TIMEZONE}."
@@ -961,8 +974,57 @@ install_base_packages() {
                 log_warn "Not available from this host's repositories, skipped: ${missing[*]}"
             fi
         fi
+        install_speedtest_cli
     fi
     log_info "Base packages installed and verified."
+}
+
+# Ookla's official Speedtest CLI, from their packagecloud repository
+# (https://www.speedtest.net/apps/cli). Best effort: any failure is flagged for
+# review and the run carries on. Safe to re-run; skipped when already installed.
+SPEEDTEST_REPO_URL_BASE="https://packagecloud.io/install/repositories/ookla/speedtest-cli"
+install_speedtest_cli() {
+    log_info "== Speedtest CLI (Ookla) =="
+    if command -v speedtest >/dev/null 2>&1 && speedtest --version 2>/dev/null | grep -qi ookla; then
+        log_info "Ookla Speedtest CLI already installed; nothing to do."
+        return 0
+    fi
+
+    # The unofficial Python 'speedtest-cli' conflicts with Ookla's package.
+    # Removing someone's tool is their call, so flag it instead.
+    case "$DISTRO_FAMILY" in
+        debian) dpkg -s speedtest-cli >/dev/null 2>&1 && local conflict=1 ;;
+        fedora|rhel) rpm -q speedtest-cli >/dev/null 2>&1 && local conflict=1 ;;
+    esac
+    if [[ "${conflict:-0}" == 1 ]]; then
+        flag_step "Speedtest CLI" "the unofficial 'speedtest-cli' package is installed and conflicts with Ookla's 'speedtest'. Remove it (for example: sudo ${PKG_MANAGER} remove speedtest-cli) and re-run."
+        return 0
+    fi
+
+    local ext="deb"
+    [[ "$DISTRO_FAMILY" == "debian" ]] || ext="rpm"
+    local tmp
+    tmp="$(mktemp)" || { flag_step "Speedtest CLI" "could not create a temporary file."; return 0; }
+
+    # Download first and run only on success, so a failed or partial download
+    # is never executed. TLS verification stays on.
+    if ! timeout 120 curl -fsSL "${SPEEDTEST_REPO_URL_BASE}/script.${ext}.sh" -o "$tmp" || [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        flag_step "Speedtest CLI" "could not download Ookla's repository setup script from packagecloud.io."
+        return 0
+    fi
+    if ! timeout 300 bash "$tmp"; then
+        rm -f "$tmp"
+        flag_step "Speedtest CLI" "Ookla's repository setup script failed (this distro release may not be supported yet)."
+        return 0
+    fi
+    rm -f "$tmp"
+
+    if ! pkg_install speedtest || ! command -v speedtest >/dev/null 2>&1; then
+        flag_step "Speedtest CLI" "the 'speedtest' package did not install from Ookla's repository."
+        return 0
+    fi
+    log_info "Speedtest CLI installed. Run 'speedtest' once to review and accept Ookla's license."
 }
 
 

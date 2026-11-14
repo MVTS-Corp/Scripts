@@ -1,4 +1,4 @@
-README.md v1.7.2 (Last Rev: 2026-11-14)
+README.md v1.8.0 (Last Rev: 2026-11-14)
 
 # Server-Setup
 
@@ -23,8 +23,11 @@ AlmaLinux) also detected and supported.
   note): `wget`, `gnupg`, `zip`, `bzip2`, `xz`, `vim`, `nano`, `less`, `htop`,
   `tmux`, `git`, `rsync`, `jq`, `lsof`, `psmisc`, `ping`, `traceroute`, `mtr`,
   `tcpdump`, `pciutils`, bash completion, man pages, `logrotate`, and
-  `smartmontools` on real hardware. `--skip-extra-tools` installs only the
-  essentials.
+  `smartmontools` on real hardware. Also Ookla's official Speedtest CLI
+  (`speedtest`), from Ookla's package repository, for testing an internet
+  connection from the console (run it once to accept Ookla's license; an
+  unofficial `speedtest-cli` package conflicts and is flagged, not removed).
+  `--skip-extra-tools` installs only the essentials.
 - Offers to change the host name. You enter the full name including the
   domain in one line (for example `server01.example.com`), or pass
   `--hostname`. Unattended runs leave the name alone unless `--hostname`
@@ -425,6 +428,13 @@ Newest first. Versions are `setup-server.sh` versions; the full technical
 detail for each is in the changelog at the top of the script. Server-Setup
 runs straight from `main` and is not tagged; the release channels described
 in the top-level README apply to NTP-Config, which this tool calls.
+
+### v1.8.0 (2026-11-14)
+
+- Installs Ookla's official Speedtest CLI (`speedtest`) with the extra admin
+  tools, from Ookla's packagecloud repository on Debian/Ubuntu and
+  Fedora/RHEL hosts. Best effort: a failure is flagged, not fatal.
+  `--skip-extra-tools` skips it. The Ookla license is not accepted for you.
 
 ### v1.7.2 (2026-11-14)
 
