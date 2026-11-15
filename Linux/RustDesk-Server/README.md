@@ -276,8 +276,9 @@ installer at v1.0.1 and RustDesk 1.1.16/1.1.15 pinned by digest.
 | Without `-k _` on hbbr, the same wrong-key and empty-key relay requests are accepted; re-running the installer restores `-k _` and status passes | Tested 2026-11-14, lab VM (control test) |
 | 21115-21117/tcp reachable from outside, 21118/21119 time out, UDP 21116 reaches the accept rule (nft counter) | Tested 2026-11-14, lab VM from its Windows host over WSL NAT, nft backend only |
 | `--alert` passes the current run's log tail to send-alert on failure (also on exit 3, by design) | Tested 2026-11-14, lab VM, stub send-alert (delivery by the real Linux/Notifications not tested) |
-| Clients with the key register and connect, including forced relay | Assumed: needs a lab test with real clients |
-| A real client without the key is refused | Assumed: proven at protocol level only |
+| Clients with the key register and connect | Tested 2026-11-14, lab VM (WSL mirrored networking): Windows desktop client and a phone on the same LAN; session ran direct |
+| A real session through the relay (forced relay) | Assumed: relay pairing proven at protocol level only, not with real clients |
+| A real client without the key is refused when it initiates | Assumed: proven at protocol level only. Seen with real clients: a client without the key still registers and can still be reached by a client that has the key, as described under Key Enforcement |
 | Reachability through a real public network and provider firewall | Assumed: needs a test on the production host |
 
 ## Operator Checklist After Install
