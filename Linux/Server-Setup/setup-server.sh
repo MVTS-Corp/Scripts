@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-11-14
-# Version: v1.7.2
+# 2026-11-16
+# Version: v1.8.0
 #
 # CHANGELOG:
+#   v1.8.0 - Guest tools: Hyper-V daemons are now enabled and checked (the
+#            KVP daemon is what lets the host see the VM's IP address) and
+#            the step is flagged when it is missing. VirtualBox guests get
+#            the guest utilities.
 #   v1.7.2 - Fix v1.7.1 failing before any change was made with
 #            "ifupdown_managed_ifaces: command not found": the provisioning
 #            plan called the new helper before the script had defined it.
@@ -236,7 +240,7 @@ NOTIFICATIONS_LOCAL="${SCRIPT_DIR}/../Notifications/install.sh"
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.7.2"
+SCRIPT_VERSION="v1.8.0"
 
 # Package sets for a daily-use production server. The essentials must install
 # (the run stops if they cannot); the extras are best effort, since a repo may
@@ -794,7 +798,8 @@ print_provisioning_plan() {
     case "$virt" in
         kvm|qemu) guest_txt="This host is a ${virt} virtual machine: install qemu-guest-agent." ;;
         vmware) guest_txt="This host is a VMware virtual machine: install open-vm-tools." ;;
-        microsoft) guest_txt="This host is a Hyper-V virtual machine: install the Hyper-V guest daemons." ;;
+        microsoft) guest_txt="This host is a Hyper-V virtual machine: install the Hyper-V guest daemons and enable them, so the host can see this VM's IP address." ;;
+        oracle) guest_txt="This host is a VirtualBox virtual machine: install the VirtualBox guest utilities." ;;
         none|"") guest_txt="Not a virtual machine, so nothing is installed." ;;
         *) guest_txt="Detected '${virt}'; no guest tools are installed for it." ;;
     esac
@@ -1715,19 +1720,31 @@ install_guest_tools() {
         return 0
     fi
 
-    local virt pkgs=() svc=""
+    local virt pkgs=() svcs=()
     virt="$(systemd-detect-virt 2>/dev/null || true)"
     case "$virt" in
         kvm|qemu)
-            pkgs=(qemu-guest-agent); svc="qemu-guest-agent" ;;
+            pkgs=(qemu-guest-agent); svcs=(qemu-guest-agent) ;;
         vmware)
             pkgs=(open-vm-tools)
-            [[ "$DISTRO_FAMILY" == "debian" ]] && svc="open-vm-tools" || svc="vmtoolsd" ;;
+            [[ "$DISTRO_FAMILY" == "debian" ]] && svcs=(open-vm-tools) || svcs=(vmtoolsd) ;;
         microsoft)
+            # The KVP daemon is what reports this VM's IP address to the Hyper-V
+            # host; the VSS daemon allows consistent host-side snapshots. Unit
+            # names differ by family and kernel, so every known name is tried
+            # and only the ones that exist are enabled.
             if [[ "$DISTRO_ID" == "ubuntu" ]]; then
                 pkgs=(linux-tools-virtual linux-cloud-tools-virtual)
             else
                 pkgs=(hyperv-daemons)
+            fi
+            svcs=(hv-kvp-daemon hv-vss-daemon hv-fcopy-daemon hv-fcopy-uio-daemon
+                  hypervkvpd hypervvssd hypervfcopyd) ;;
+        oracle)
+            if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+                pkgs=(virtualbox-guest-utils); svcs=(virtualbox-guest-utils)
+            else
+                pkgs=(virtualbox-guest-additions); svcs=(vboxservice)
             fi ;;
         none|"")
             log_info "Not a virtual machine (or not detected); no guest tools needed."
@@ -1745,10 +1762,23 @@ install_guest_tools() {
         GUEST_OUTCOME="FAILED - flagged for review"
         return 0
     fi
-    if [[ -n "$svc" ]]; then
-        timeout 60 systemctl enable --now "$svc" >/dev/null 2>&1 \
-            || timeout 60 systemctl start "$svc" >/dev/null 2>&1 \
-            || log_info "  ${svc} is installed; it starts on its own once the hypervisor exposes its agent channel."
+
+    local svc enabled=() unit_files
+    unit_files="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}')"
+    for svc in "${svcs[@]}"; do
+        grep -qx "${svc}.service" <<<"$unit_files" || continue
+        if timeout 60 systemctl enable --now "$svc" >/dev/null 2>&1 \
+            || timeout 60 systemctl start "$svc" >/dev/null 2>&1; then
+            enabled+=("$svc")
+        else
+            log_info "  ${svc} is installed; it starts on its own once the hypervisor exposes its agent channel."
+        fi
+    done
+    (( ${#enabled[@]} )) && log_info "  Services running: ${enabled[*]}"
+    if [[ "$virt" == "microsoft" ]] && ! grep -qE '^hv-kvp-daemon\.service|^hypervkvpd\.service' <<<"$unit_files"; then
+        flag_step "Guest tools" "Hyper-V KVP daemon unit not found; the host may not show this VM's IP address. A reboot into the matching kernel may be needed."
+        GUEST_OUTCOME="installed, KVP daemon missing - flagged for review"
+        return 0
     fi
     GUEST_OUTCOME="${pkgs[*]} installed (${virt})"
 }

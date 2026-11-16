@@ -1,4 +1,4 @@
-README.md v1.7.2 (Last Rev: 2026-11-14)
+README.md v1.8.0 (Last Rev: 2026-11-16)
 
 # Server-Setup
 
@@ -273,8 +273,10 @@ Bans go through ufw when ufw is active. On RHEL it needs the EPEL repository.
 
 **Guest tools** (`--skip-guest-tools`). Detects the hypervisor with
 `systemd-detect-virt` and installs `qemu-guest-agent` (KVM/Proxmox),
-`open-vm-tools` (VMware), or the Hyper-V daemons. Nothing on physical hosts or
-containers.
+`open-vm-tools` (VMware), the Hyper-V daemons, or `virtualbox-guest-utils`
+(VirtualBox). On Hyper-V the KVP and VSS daemons are enabled and checked, since
+the KVP daemon is what lets the host show the VM's IP address. If it is missing
+the step is flagged. Nothing on physical hosts or containers.
 
 **Logging** (`--skip-logging`). Keeps the systemd journal across reboots,
 capped at 1G and 3 months, in `/etc/systemd/journald.conf.d/`.
@@ -425,6 +427,12 @@ Newest first. Versions are `setup-server.sh` versions; the full technical
 detail for each is in the changelog at the top of the script. Server-Setup
 runs straight from `main` and is not tagged; the release channels described
 in the top-level README apply to NTP-Config, which this tool calls.
+
+### v1.8.0 (2026-11-16)
+
+- Guest tools: on Hyper-V the guest daemons are now enabled and checked, so
+  the host can see the VM's IP address (the step is flagged if the KVP daemon
+  is missing). VirtualBox guests get the guest utilities.
 
 ### v1.7.2 (2026-11-14)
 
