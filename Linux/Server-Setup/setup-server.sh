@@ -7,8 +7,12 @@
 # CHANGELOG:
 #   v1.8.0 - Guest tools: Hyper-V daemons are now enabled and checked (the
 #            KVP daemon is what lets the host see the VM's IP address) and
-#            the step is flagged when it is missing. VirtualBox guests get
-#            the guest utilities.
+#            the step is flagged when it is missing; Ubuntu also gets the
+#            tools matching the running kernel. VirtualBox guests get the
+#            guest utilities. The netplan step no longer tells the operator
+#            to run 'netplan apply' when the renderer was already
+#            NetworkManager and nothing changed. fail2ban's harmless Python
+#            SyntaxWarnings during install are hidden.
 #   v1.7.2 - Fix v1.7.1 failing before any change was made with
 #            "ifupdown_managed_ifaces: command not found": the provisioning
 #            plan called the new helper before the script had defined it.
@@ -1416,12 +1420,13 @@ configure_netplan_renderer() {
         return 0
     fi
 
-    local f
+    local f netplan_changed=0
     for f in "${yaml_files[@]}"; do
         if grep -Eq '^[[:space:]]*renderer:[[:space:]]*NetworkManager[[:space:]]*$' "$f"; then
             log_info "  ${f}: renderer already set to NetworkManager, skipping."
             continue
         fi
+        netplan_changed=1
         cp -a "$f" "${f}.bak-$(date '+%Y%m%d-%H%M%S')"
         if grep -Eq '^[[:space:]]*renderer:[[:space:]]*' "$f"; then
             sed -i -E 's/^([[:space:]]*renderer:[[:space:]]*).*/\1NetworkManager/' "$f"
@@ -1443,9 +1448,14 @@ configure_netplan_renderer() {
         fi
     done
 
-    netplan generate || die "netplan generate failed after editing renderer config - check the files under /etc/netplan for a syntax error (backups were saved alongside each edited file)."
-    log_info "netplan config validated. NOT applied automatically (avoids disrupting an active remote session) - run 'sudo netplan apply' or reboot when ready."
-    NETPLAN_OUTCOME="renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
+    if (( netplan_changed )); then
+        netplan generate || die "netplan generate failed after editing renderer config - check the files under /etc/netplan for a syntax error (backups were saved alongside each edited file)."
+        log_info "netplan config validated. NOT applied automatically (avoids disrupting an active remote session) - run 'sudo netplan apply' or reboot when ready."
+        NETPLAN_OUTCOME="renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
+    else
+        log_info "netplan renderer was already NetworkManager everywhere; nothing to change or apply."
+        NETPLAN_OUTCOME="already NetworkManager (nothing changed)"
+    fi
 
     configure_initramfs_no_network
 }
@@ -1763,6 +1773,14 @@ install_guest_tools() {
         return 0
     fi
 
+    # Ubuntu's hv_* daemons are wrappers that run the copy matching the running
+    # kernel, so install that build too. Best effort: a kernel without a
+    # matching package (custom or retired build) is reported by the KVP check.
+    if [[ "$virt" == "microsoft" && "$DISTRO_ID" == "ubuntu" ]]; then
+        pkg_install "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 \
+            || log_info "  No linux-cloud-tools package for kernel $(uname -r); relying on the metapackages."
+    fi
+
     local svc enabled=() unit_files
     unit_files="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}')"
     for svc in "${svcs[@]}"; do
@@ -1949,7 +1967,9 @@ ClientAliveCountMax 2"
 install_fail2ban_packages() {
     case "$DISTRO_FAMILY" in
         debian)
-            pkg_install fail2ban || return 1
+            # Byte-compiling fail2ban's bundled test files prints harmless
+            # SyntaxWarnings on newer Python; hide them so real errors stand out.
+            PYTHONWARNINGS=ignore pkg_install fail2ban || return 1
             # Lets fail2ban read the journal on hosts with no auth.log.
             pkg_install python3-systemd || log_warn "  python3-systemd did not install; fail2ban may not read the journal on this host."
             ;;

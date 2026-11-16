@@ -433,6 +433,9 @@ in the top-level README apply to NTP-Config, which this tool calls.
 - Guest tools: on Hyper-V the guest daemons are now enabled and checked, so
   the host can see the VM's IP address (the step is flagged if the KVP daemon
   is missing). VirtualBox guests get the guest utilities.
+- The netplan step no longer says to run `netplan apply` when the renderer was
+  already NetworkManager and nothing changed. fail2ban's harmless Python
+  SyntaxWarnings are hidden during install.
 
 ### v1.7.2 (2026-11-14)
 
