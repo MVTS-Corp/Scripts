@@ -433,6 +433,9 @@ in the top-level README apply to NTP-Config, which this tool calls.
 - Guest tools: on Hyper-V the guest daemons are now enabled and checked, so
   the host can see the VM's IP address (the step is flagged if the KVP daemon
   is missing). VirtualBox guests get the guest utilities.
+- On Ubuntu the Hyper-V KVP helper scripts are linked into
+  `/usr/libexec/hypervkvpd/`, fixing `hv_get_dns_info: not found` in the daemon
+  log.
 - The netplan step no longer says to run `netplan apply` when the renderer was
   already NetworkManager and nothing changed. fail2ban's harmless Python
   SyntaxWarnings are hidden during install.

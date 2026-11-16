@@ -9,7 +9,9 @@
 #            KVP daemon is what lets the host see the VM's IP address) and
 #            the step is flagged when it is missing; Ubuntu also gets the
 #            tools matching the running kernel. VirtualBox guests get the
-#            guest utilities. The netplan step no longer tells the operator
+#            guest utilities. On Ubuntu the KVP helper scripts are linked
+#            into /usr/libexec/hypervkvpd/, where hv_kvp_daemon looks for
+#            them ("hv_get_dns_info: not found" in its log). The netplan step no longer tells the operator
 #            to run 'netplan apply' when the renderer was already
 #            NetworkManager and nothing changed. fail2ban's harmless Python
 #            SyntaxWarnings during install are hidden.
@@ -1717,6 +1719,29 @@ configure_firewall() {
 # ---------------------------------------------------------------------------
 # Hypervisor guest tools
 # ---------------------------------------------------------------------------
+
+# Ubuntu's hv_kvp_daemon is built to call its helper scripts from the Red Hat
+# path /usr/libexec/hypervkvpd/, but Ubuntu ships them elsewhere. Without them
+# the daemon logs "hv_get_dns_info: not found" and the Hyper-V host cannot read
+# the VM's DNS and DHCP details. Link each helper into that path, found by
+# searching rather than assuming where this release put it.
+link_hyperv_kvp_helpers() {
+    local dir=/usr/libexec/hypervkvpd helper src missing=()
+    for helper in hv_get_dns_info hv_get_dhcp_info hv_set_ifconfig; do
+        [[ -e "$dir/$helper" ]] && continue
+        src="$(command -v "$helper" 2>/dev/null || true)"
+        [[ -n "$src" ]] || src="$(find /usr/sbin /usr/bin /usr/lib /usr/libexec -maxdepth 4 \
+            -name "$helper" -type f -perm -u+x -not -path "$dir/*" 2>/dev/null | sort | head -n1)"
+        if [[ -z "$src" ]]; then missing+=("$helper"); continue; fi
+        mkdir -p "$dir" && ln -sfn "$src" "$dir/$helper" \
+            && log_info "  Linked ${dir}/${helper} -> ${src}"
+    done
+    if (( ${#missing[@]} )); then
+        log_warn "  Hyper-V helper(s) not found on this host: ${missing[*]}. The host may not see this VM's DNS/DHCP details."
+        return 1
+    fi
+    return 0
+}
 install_guest_tools() {
     log_info "== Guest tools =="
     if (( SKIP_GUEST_TOOLS )); then
@@ -1793,6 +1818,9 @@ install_guest_tools() {
         fi
     done
     (( ${#enabled[@]} )) && log_info "  Services running: ${enabled[*]}"
+    if [[ "$virt" == "microsoft" && "$DISTRO_ID" == "ubuntu" ]] && ! link_hyperv_kvp_helpers; then
+        flag_step "Guest tools" "Hyper-V KVP helper scripts not found; the host may not see this VM's DNS/DHCP details."
+    fi
     if [[ "$virt" == "microsoft" ]] && ! grep -qE '^hv-kvp-daemon\.service|^hypervkvpd\.service' <<<"$unit_files"; then
         flag_step "Guest tools" "Hyper-V KVP daemon unit not found; the host may not show this VM's IP address. A reboot into the matching kernel may be needed."
         GUEST_OUTCOME="installed, KVP daemon missing - flagged for review"
