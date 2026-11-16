@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 #
 # setup-server.sh
-# 2026-11-14
-# Version: v1.7.2
+# 2026-11-16
+# Version: v1.8.0
 #
 # CHANGELOG:
+#   v1.8.0 - Guest tools: Hyper-V daemons are now enabled and checked (the
+#            KVP daemon is what lets the host see the VM's IP address) and
+#            the step is flagged when it is missing; Ubuntu also gets the
+#            tools matching the running kernel. VirtualBox guests get the
+#            guest utilities. On Ubuntu the KVP helper scripts are linked
+#            into /usr/libexec/hypervkvpd/, where hv_kvp_daemon looks for
+#            them ("hv_get_dns_info: not found" in its log). The netplan step no longer tells the operator
+#            to run 'netplan apply' when the renderer was already
+#            NetworkManager and nothing changed. fail2ban's harmless Python
+#            SyntaxWarnings during install are hidden.
 #   v1.7.2 - Fix v1.7.1 failing before any change was made with
 #            "ifupdown_managed_ifaces: command not found": the provisioning
 #            plan called the new helper before the script had defined it.
@@ -236,7 +246,7 @@ NOTIFICATIONS_LOCAL="${SCRIPT_DIR}/../Notifications/install.sh"
 LOG_DIR="/var/log/server-setup"
 AUDIT_LOG="${LOG_DIR}/audit.log"
 LOG_RETENTION_DAYS=180
-SCRIPT_VERSION="v1.7.2"
+SCRIPT_VERSION="v1.8.0"
 
 # Package sets for a daily-use production server. The essentials must install
 # (the run stops if they cannot); the extras are best effort, since a repo may
@@ -794,7 +804,8 @@ print_provisioning_plan() {
     case "$virt" in
         kvm|qemu) guest_txt="This host is a ${virt} virtual machine: install qemu-guest-agent." ;;
         vmware) guest_txt="This host is a VMware virtual machine: install open-vm-tools." ;;
-        microsoft) guest_txt="This host is a Hyper-V virtual machine: install the Hyper-V guest daemons." ;;
+        microsoft) guest_txt="This host is a Hyper-V virtual machine: install the Hyper-V guest daemons and enable them, so the host can see this VM's IP address." ;;
+        oracle) guest_txt="This host is a VirtualBox virtual machine: install the VirtualBox guest utilities." ;;
         none|"") guest_txt="Not a virtual machine, so nothing is installed." ;;
         *) guest_txt="Detected '${virt}'; no guest tools are installed for it." ;;
     esac
@@ -1411,12 +1422,13 @@ configure_netplan_renderer() {
         return 0
     fi
 
-    local f
+    local f netplan_changed=0
     for f in "${yaml_files[@]}"; do
         if grep -Eq '^[[:space:]]*renderer:[[:space:]]*NetworkManager[[:space:]]*$' "$f"; then
             log_info "  ${f}: renderer already set to NetworkManager, skipping."
             continue
         fi
+        netplan_changed=1
         cp -a "$f" "${f}.bak-$(date '+%Y%m%d-%H%M%S')"
         if grep -Eq '^[[:space:]]*renderer:[[:space:]]*' "$f"; then
             sed -i -E 's/^([[:space:]]*renderer:[[:space:]]*).*/\1NetworkManager/' "$f"
@@ -1438,9 +1450,14 @@ configure_netplan_renderer() {
         fi
     done
 
-    netplan generate || die "netplan generate failed after editing renderer config - check the files under /etc/netplan for a syntax error (backups were saved alongside each edited file)."
-    log_info "netplan config validated. NOT applied automatically (avoids disrupting an active remote session) - run 'sudo netplan apply' or reboot when ready."
-    NETPLAN_OUTCOME="renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
+    if (( netplan_changed )); then
+        netplan generate || die "netplan generate failed after editing renderer config - check the files under /etc/netplan for a syntax error (backups were saved alongside each edited file)."
+        log_info "netplan config validated. NOT applied automatically (avoids disrupting an active remote session) - run 'sudo netplan apply' or reboot when ready."
+        NETPLAN_OUTCOME="renderer set to NetworkManager - run 'sudo netplan apply' or reboot to activate"
+    else
+        log_info "netplan renderer was already NetworkManager everywhere; nothing to change or apply."
+        NETPLAN_OUTCOME="already NetworkManager (nothing changed)"
+    fi
 
     configure_initramfs_no_network
 }
@@ -1702,6 +1719,29 @@ configure_firewall() {
 # ---------------------------------------------------------------------------
 # Hypervisor guest tools
 # ---------------------------------------------------------------------------
+
+# Ubuntu's hv_kvp_daemon is built to call its helper scripts from the Red Hat
+# path /usr/libexec/hypervkvpd/, but Ubuntu ships them elsewhere. Without them
+# the daemon logs "hv_get_dns_info: not found" and the Hyper-V host cannot read
+# the VM's DNS and DHCP details. Link each helper into that path, found by
+# searching rather than assuming where this release put it.
+link_hyperv_kvp_helpers() {
+    local dir=/usr/libexec/hypervkvpd helper src missing=()
+    for helper in hv_get_dns_info hv_get_dhcp_info hv_set_ifconfig; do
+        [[ -e "$dir/$helper" ]] && continue
+        src="$(command -v "$helper" 2>/dev/null || true)"
+        [[ -n "$src" ]] || src="$(find /usr/sbin /usr/bin /usr/lib /usr/libexec -maxdepth 4 \
+            -name "$helper" -type f -perm -u+x -not -path "$dir/*" 2>/dev/null | sort | head -n1)"
+        if [[ -z "$src" ]]; then missing+=("$helper"); continue; fi
+        mkdir -p "$dir" && ln -sfn "$src" "$dir/$helper" \
+            && log_info "  Linked ${dir}/${helper} -> ${src}"
+    done
+    if (( ${#missing[@]} )); then
+        log_warn "  Hyper-V helper(s) not found on this host: ${missing[*]}. The host may not see this VM's DNS/DHCP details."
+        return 1
+    fi
+    return 0
+}
 install_guest_tools() {
     log_info "== Guest tools =="
     if (( SKIP_GUEST_TOOLS )); then
@@ -1715,19 +1755,31 @@ install_guest_tools() {
         return 0
     fi
 
-    local virt pkgs=() svc=""
+    local virt pkgs=() svcs=()
     virt="$(systemd-detect-virt 2>/dev/null || true)"
     case "$virt" in
         kvm|qemu)
-            pkgs=(qemu-guest-agent); svc="qemu-guest-agent" ;;
+            pkgs=(qemu-guest-agent); svcs=(qemu-guest-agent) ;;
         vmware)
             pkgs=(open-vm-tools)
-            [[ "$DISTRO_FAMILY" == "debian" ]] && svc="open-vm-tools" || svc="vmtoolsd" ;;
+            [[ "$DISTRO_FAMILY" == "debian" ]] && svcs=(open-vm-tools) || svcs=(vmtoolsd) ;;
         microsoft)
+            # The KVP daemon is what reports this VM's IP address to the Hyper-V
+            # host; the VSS daemon allows consistent host-side snapshots. Unit
+            # names differ by family and kernel, so every known name is tried
+            # and only the ones that exist are enabled.
             if [[ "$DISTRO_ID" == "ubuntu" ]]; then
                 pkgs=(linux-tools-virtual linux-cloud-tools-virtual)
             else
                 pkgs=(hyperv-daemons)
+            fi
+            svcs=(hv-kvp-daemon hv-vss-daemon hv-fcopy-daemon hv-fcopy-uio-daemon
+                  hypervkvpd hypervvssd hypervfcopyd) ;;
+        oracle)
+            if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+                pkgs=(virtualbox-guest-utils); svcs=(virtualbox-guest-utils)
+            else
+                pkgs=(virtualbox-guest-additions); svcs=(vboxservice)
             fi ;;
         none|"")
             log_info "Not a virtual machine (or not detected); no guest tools needed."
@@ -1745,10 +1797,34 @@ install_guest_tools() {
         GUEST_OUTCOME="FAILED - flagged for review"
         return 0
     fi
-    if [[ -n "$svc" ]]; then
-        timeout 60 systemctl enable --now "$svc" >/dev/null 2>&1 \
-            || timeout 60 systemctl start "$svc" >/dev/null 2>&1 \
-            || log_info "  ${svc} is installed; it starts on its own once the hypervisor exposes its agent channel."
+
+    # Ubuntu's hv_* daemons are wrappers that run the copy matching the running
+    # kernel, so install that build too. Best effort: a kernel without a
+    # matching package (custom or retired build) is reported by the KVP check.
+    if [[ "$virt" == "microsoft" && "$DISTRO_ID" == "ubuntu" ]]; then
+        pkg_install "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 \
+            || log_info "  No linux-cloud-tools package for kernel $(uname -r); relying on the metapackages."
+    fi
+
+    local svc enabled=() unit_files
+    unit_files="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}')"
+    for svc in "${svcs[@]}"; do
+        grep -qx "${svc}.service" <<<"$unit_files" || continue
+        if timeout 60 systemctl enable --now "$svc" >/dev/null 2>&1 \
+            || timeout 60 systemctl start "$svc" >/dev/null 2>&1; then
+            enabled+=("$svc")
+        else
+            log_info "  ${svc} is installed; it starts on its own once the hypervisor exposes its agent channel."
+        fi
+    done
+    (( ${#enabled[@]} )) && log_info "  Services running: ${enabled[*]}"
+    if [[ "$virt" == "microsoft" && "$DISTRO_ID" == "ubuntu" ]] && ! link_hyperv_kvp_helpers; then
+        flag_step "Guest tools" "Hyper-V KVP helper scripts not found; the host may not see this VM's DNS/DHCP details."
+    fi
+    if [[ "$virt" == "microsoft" ]] && ! grep -qE '^hv-kvp-daemon\.service|^hypervkvpd\.service' <<<"$unit_files"; then
+        flag_step "Guest tools" "Hyper-V KVP daemon unit not found; the host may not show this VM's IP address. A reboot into the matching kernel may be needed."
+        GUEST_OUTCOME="installed, KVP daemon missing - flagged for review"
+        return 0
     fi
     GUEST_OUTCOME="${pkgs[*]} installed (${virt})"
 }
@@ -1919,7 +1995,9 @@ ClientAliveCountMax 2"
 install_fail2ban_packages() {
     case "$DISTRO_FAMILY" in
         debian)
-            pkg_install fail2ban || return 1
+            # Byte-compiling fail2ban's bundled test files prints harmless
+            # SyntaxWarnings on newer Python; hide them so real errors stand out.
+            PYTHONWARNINGS=ignore pkg_install fail2ban || return 1
             # Lets fail2ban read the journal on hosts with no auth.log.
             pkg_install python3-systemd || log_warn "  python3-systemd did not install; fail2ban may not read the journal on this host."
             ;;
